@@ -1,34 +1,35 @@
-import Queue
 import copy
-import gc
 import re
+import testconstants
+import gc
 import sys
 import traceback
-from pprint import pprint
+import Queue
 from threading import Thread
-
-import testconstants
-from builds.build_query import BuildQuery
+from basetestcase import BaseTestCase
+from mc_bin_client import MemcachedError
+from memcached.helper.data_helper import VBucketAwareMemcached, MemcachedClientHelper
+from membase.helper.bucket_helper import BucketOperationHelper
+from membase.api.rest_client import RestConnection, RestHelper, Bucket
+from membase.helper.cluster_helper import ClusterOperationHelper
+from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
 from couchbase_helper.document import DesignDocument, View
 from couchbase_helper.documentgenerator import BlobGenerator
-from mc_bin_client import MemcachedError
-from membase.api.rest_client import RestConnection, RestHelper, Bucket
-from membase.helper.bucket_helper import BucketOperationHelper
-from membase.helper.cluster_helper import ClusterOperationHelper
-from memcached.helper.data_helper import VBucketAwareMemcached, MemcachedClientHelper
 from query_tests_helper import QueryHelperTests
-from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
 from scripts.install import InstallerJob
+from builds.build_query import BuildQuery
+from pprint import pprint
 from testconstants import CB_REPO
-from testconstants import CB_VERSION_NAME
-from testconstants import COUCHBASE_MP_VERSION
-from testconstants import COUCHBASE_VERSIONS
+from testconstants import MV_LATESTBUILD_REPO
+from testconstants import SHERLOCK_BUILD_REPO
 from testconstants import COUCHBASE_VERSION_2
 from testconstants import COUCHBASE_VERSION_3
-from testconstants import MV_LATESTBUILD_REPO
+from testconstants import COUCHBASE_VERSIONS
 from testconstants import SHERLOCK_VERSION
+from testconstants import CB_VERSION_NAME
+from testconstants import COUCHBASE_MP_VERSION
+from testconstants import CE_EE_ON_SAME_FOLDER
 from testconstants import STANDARD_BUCKET_PORT
-
 
 class NewUpgradeBaseTest(QueryHelperTests):
     def setUp(self):
@@ -179,7 +180,7 @@ class NewUpgradeBaseTest(QueryHelperTests):
         if self.port and self.port != '8091':
             self.rest = RestConnection(self.master)
             self.rest_helper = RestHelper(self.rest)
-        self.sleep(7, "wait to make sure node is ready")
+        self.sleep(120, "wait to make sure node is ready")
         if len(servers) > 1:
             if services is None:
                 self.cluster.rebalance([servers[0]], servers[1:], [],
@@ -188,14 +189,14 @@ class NewUpgradeBaseTest(QueryHelperTests):
                 set_services = services.split(",")
                 for i in range(1, len(set_services)):
                     self.cluster.rebalance([servers[0]], [servers[i]], [], use_hostnames=self.use_hostnames, services=[set_services[i]])
+                    self.sleep(60)
+
         self.buckets = []
         gc.collect()
         if self.input.param('extra_verification', False):
             self.total_buckets += 2
             print self.total_buckets
-        #self.bucket_size = self._get_bucket_size(self.quota,
-        # self.total_buckets)
-        self.bucket_size = 256
+        self.bucket_size = self._get_bucket_size(self.quota, self.total_buckets)
         self._bucket_creation()
         if self.stop_persistence:
             for server in servers:

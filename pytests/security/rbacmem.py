@@ -1,9 +1,22 @@
-from basetestcase import BaseTestCase
+from security.ldaptest import ldaptest
 from membase.api.rest_client import RestConnection
-from security.rbac_base import RbacBase
+import urllib
 from security.rbacmain import rbacmain
+import json
+from remote.remote_util import RemoteMachineShellConnection
+from newupgradebasetest import NewUpgradeBaseTest
+from security.auditmain import audit
+import commands
+import socket
+import fileinput
+import sys
+from subprocess import Popen, PIPE
+from security.rbac_base import RbacBase
+from basetestcase import BaseTestCase
 from testmemcached import TestMemcachedClient
 from testmemcached import TestSDK
+from membase.api.rest_client import RestConnection, RestHelper
+from couchbase_helper.documentgenerator import BlobGenerator
 
 
 class dataRoles():

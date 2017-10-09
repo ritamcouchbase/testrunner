@@ -1,25 +1,24 @@
-import ConfigParser
-import commands
-import datetime
-import os
+import logger
 import time
-import types
 import unittest
-from threading import Thread
-
+import os
+import commands
+import types
+import datetime
 from selenium import webdriver
-from selenium.common.exceptions import NoSuchElementException, StaleElementReferenceException
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait, Select
-
-import logger
+from selenium.common.exceptions import NoSuchElementException, StaleElementReferenceException
+from threading import Thread
+import ConfigParser
 from TestInput import TestInputSingleton
+from security.rbac_base import RbacBase
+from remote.remote_util import RemoteMachineShellConnection
 from membase.api.rest_client import RestConnection
 from membase.helper.bucket_helper import BucketOperationHelper
 from membase.helper.cluster_helper import ClusterOperationHelper
-from remote.remote_util import RemoteMachineShellConnection
 
 """
 *** IMPORTANT! NEED TO READ BEFORE RUN UI TEST ***
@@ -119,6 +118,42 @@ class BaseUITestCase(unittest.TestCase):
                 return True
         return False
 
+    def add_built_in_server_user(self, testuser=None, rolelist=None, node=None):
+        """
+           From spock, couchbase server is built with some users that handles
+           some specific task such as:
+               cbadminbucket
+           Default added user is cbadminbucket with admin role
+        """
+        rest = RestConnection(self.master)
+        versions = rest.get_nodes_versions()
+        for version in versions:
+            if "5" > version:
+                self.log.info("Atleast one of the nodes in the cluster is "
+                              "pre 5.0 version. Hence not creating rbac user "
+                              "for the cluster. RBAC is a 5.0 feature.")
+                return
+        if testuser is None:
+            testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket',
+                                                'password': 'password'}]
+        if rolelist is None:
+            rolelist = [{'id': 'cbadminbucket', 'name': 'cbadminbucket',
+                                                      'roles': 'admin'}]
+        if node is None:
+            node = self.master
+
+        self.log.info("**** add built-in '%s' user to node %s ****" % (testuser[0]["name"],
+                                                                       node.ip))
+        RbacBase().create_user_source(testuser, 'builtin', node)
+        self.sleep(10)
+
+        self.log.info("**** add '%s' role to '%s' user ****" % (rolelist[0]["roles"],
+                                                                testuser[0]["name"]))
+        status = RbacBase().add_user_role(rolelist, RestConnection(node), 'builtin')
+        self.sleep(10)
+        return status
+
+
     def setUp(self):
         try:
             self.log = logger.Logger.get_logger()
@@ -196,7 +231,13 @@ class BaseUITestCase(unittest.TestCase):
                 print "test fails, teardown will be skipped!!!"
                 return
             rest = RestConnection(self.servers[0])
-            if rest._rebalance_progress_status() == 'running':
+            try:
+                reb_status = rest._rebalance_progress_status()
+            except ValueError as e:
+                if e.message == 'No JSON object could be decoded':
+                    print "cluster not initialized!!!"
+                    return
+            if reb_status == 'running':
                 stopped = rest.stop_rebalance()
                 self.assertTrue(stopped, msg="unable to stop rebalance")
             BucketOperationHelper.delete_all_buckets_or_assert(self.servers, self)
@@ -366,13 +407,14 @@ class BaseHelperControls():
         self._user_password = helper.find_control('login', 'password_field')
         self._login_btn = helper.find_control('login', 'login_btn')
         self._logout_btn = helper.find_control('login', 'logout_btn')
+        self._user_menu_show = helper.find_control('login', 'user_menu_show')
         self.error = helper.find_control('login', 'error')
 
 
 class BaseHelper():
     def __init__(self, tc):
         self.tc = tc
-        self.controls = BaseHelperControls(tc.driver)
+        self.controls = BaseHelperControls(self.tc.driver)
         self.wait = WebDriverWait(tc.driver, timeout=100)
 
     def wait_ajax_loaded(self):
@@ -398,7 +440,7 @@ class BaseHelper():
         if not password:
             password = self.tc.input.membase_settings.rest_password
         self.wait.until(lambda fn: self.controls._user_field.is_displayed(),
-                        "Username field is not displayed in %d sec" % (self.wait._timeout))
+                            "Username field is not displayed in %d sec" % (self.wait._timeout))
         self.controls._user_field.type(user)
         self.wait.until(lambda fn: self.controls._user_password.is_displayed(),
                         "Password field is not displayed in %d sec" % (self.wait._timeout))
@@ -410,8 +452,9 @@ class BaseHelper():
 
     def logout(self):
         self.tc.log.info("Try to logout")
-        self.wait.until(lambda fn: self.controls._logout_btn.is_displayed(),
-                        "Logout Button is not displayed in %d sec" % (self.wait._timeout))
+        self.controls._user_menu_show.click()
+        # self.wait.until(lambda fn: self.controls._logout_btn.is_displayed(),
+        #                 "Logout Button is not displayed in %d sec" % (self.wait._timeout))
         self.controls._logout_btn.click()
         time.sleep(3)
         self.tc.log.info("You are logged out")

@@ -886,7 +886,7 @@ class MovingTopFTS(FTSBaseTest):
         reb_thread.start()
         self.sleep(15)
         index = self._cb_cluster.get_fts_index_by_name('default_index_1')
-        new_plan_param = {"maxPartitionsPerPIndex": 2}
+        new_plan_param = {"maxPartitionsPerPIndex": 64}
         index.index_definition['planParams'] = \
             index.build_custom_plan_params(new_plan_param)
         index.index_definition['uuid'] = index.get_uuid()
@@ -928,7 +928,7 @@ class MovingTopFTS(FTSBaseTest):
         reb_thread.start()
         self.sleep(15)
         index = self._cb_cluster.get_fts_index_by_name('default_index_1')
-        new_plan_param = {"maxPartitionsPerPIndex": 2}
+        new_plan_param = {"maxPartitionsPerPIndex": 128}
         index.index_definition['planParams'] = \
             index.build_custom_plan_params(new_plan_param)
         index.index_definition['uuid'] = index.get_uuid()
@@ -964,7 +964,7 @@ class MovingTopFTS(FTSBaseTest):
                                    args=())
         fail_thread.start()
         index = self._cb_cluster.get_fts_index_by_name('default_index_1')
-        new_plan_param = {"maxPartitionsPerPIndex": 2}
+        new_plan_param = {"maxPartitionsPerPIndex": 64}
         index.index_definition['planParams'] = \
             index.build_custom_plan_params(new_plan_param)
         index.index_definition['uuid'] = index.get_uuid()
@@ -1005,7 +1005,7 @@ class MovingTopFTS(FTSBaseTest):
             name="failover",
             args=())
         index = self._cb_cluster.get_fts_index_by_name('default_index_1')
-        new_plan_param = {"maxPartitionsPerPIndex": 2}
+        new_plan_param = {"maxPartitionsPerPIndex": 128}
         index.index_definition['planParams'] = \
             index.build_custom_plan_params(new_plan_param)
         index.index_definition['uuid'] = index.get_uuid()
@@ -1040,6 +1040,8 @@ class MovingTopFTS(FTSBaseTest):
         self.wait_for_indexing_complete()
 
         # Stop Persistence on Node A & Node B
+        self.log.info("Stopping persistence on {0}".
+                      format(self._input.servers[:2]))
         mem_client = MemcachedClientHelper.direct_client(self._input.servers[0],
                                                          bucket)
         mem_client.stop_persistence()
@@ -1067,11 +1069,14 @@ class MovingTopFTS(FTSBaseTest):
         self.log.info("Docs in Bucket : %s, Docs in Index : %s" % (
             before_bucket_doc_count, before_index_doc_count))
 
-        # Kill memcached on Node A so that Node B becomes master
+        # Kill memcached on Node A
+        self.log.info("Killing memcached on {0}".format(self._master.ip))
         shell = RemoteMachineShellConnection(self._master)
         shell.kill_memcached()
 
         # Start persistence on Node B
+        self.log.info("Starting persistence on {0}".
+                      format(self._input.servers[1].ip))
         mem_client = MemcachedClientHelper.direct_client(self._input.servers[1],
                                                          bucket)
         mem_client.start_persistence()
@@ -1082,7 +1087,7 @@ class MovingTopFTS(FTSBaseTest):
         failover_task.result()
 
         # Wait for Failover & FTS index rollback to complete
-        self.sleep(10)
+        self.wait_for_indexing_complete()
 
         # Run FTS query to fetch count of mutated items post rollback.
         for index in self._cb_cluster.get_indexes():
@@ -1096,14 +1101,18 @@ class MovingTopFTS(FTSBaseTest):
         self.log.info("Docs in Bucket : %s, Docs in Index : %s"
                       % (after_bucket_doc_count, after_index_doc_count))
 
-        # Validation : If there are deletes, validate the #docs in index goes up post rollback
+        # Validation : If there are deletes, validate the #docs in index goes
+        #  up post rollback
         if self._input.param("delete", False):
             self.assertGreater(after_index_doc_count, before_index_doc_count,
-                               "Deletes : Index count after rollback not greater than before rollback")
+                               "Deletes : Index count after rollback not "
+                               "greater than before rollback")
         else:
-            # For Updates, validate that #hits goes down in the query output post rollback
+            # For Updates, validate that #hits goes down in the query output
+            # post rollback
             self.assertGreater(hits1, hits2,
-                               "Mutated items before rollback are not more than after rollback")
+                               "Mutated items before rollback are not more "
+                               "than after rollback")
 
         # Failover FTS node
         failover_fts_node = self._input.param("failover_fts_node", False)
@@ -1161,6 +1170,12 @@ class MovingTopFTS(FTSBaseTest):
          continuously till rebalance finishes.
         :return:
         """
+        count = 0
+
+        self.load_data()
+        self.create_fts_indexes_all_buckets()
+        self.sleep(10)
+        self.wait_for_indexing_complete()
 
         from lib.membase.api.rest_client import RestConnection, RestHelper
         rest = RestConnection(self._cb_cluster.get_master_node())
@@ -1174,17 +1189,74 @@ class MovingTopFTS(FTSBaseTest):
         self.log.info(
             "removing node(s) {0} from cluster".format(ejected_nodes))
 
-        while True:
-            rest.rebalance(otpNodes=[node.id for node in nodes],
-                           ejectedNodes=ejected_nodes)
-            self.sleep(10)
-            stopped = rest.stop_rebalance()
-            self.assertTrue(stopped, msg="unable to stop rebalance")
-
+        while count<5:
             if RestHelper(rest).is_cluster_rebalanced():
                 self.log.info("Rebalance is finished already.")
                 break
+            rest.rebalance(otpNodes=[node.id for node in nodes],
+                           ejectedNodes=ejected_nodes)
+            stopped = rest.stop_rebalance()
+            self.sleep(1)
+            self.assertTrue(stopped, msg="unable to stop rebalance")
+            count += 1
 
+        if not RestHelper(rest).is_cluster_rebalanced():
+            rest.rebalance(otpNodes=[node.id for node in nodes],
+                           ejectedNodes=ejected_nodes)
 
+    def test_rebalance_cancel_new_rebalance(self):
+        """
+            Load bucket, do not create index
+            From a 3 kv+fts node cluster, rebalance out master + one node
+            Immediately (after few secs), stop rebalance
+            Rebalance out other nodes than master.
+            After rebalance completes, create an index
+        :return:
+        """
+        self.load_data()
 
+        non_master_nodes = list(set(self._cb_cluster.get_nodes())-
+                           set([self._master]))
 
+        from lib.membase.api.rest_client import RestConnection, RestHelper
+        rest = RestConnection(self._master)
+        nodes = rest.node_statuses()
+        ejected_nodes = []
+
+        # first eject a master + non-master node
+        eject_nodes = [self._master] + [non_master_nodes[0]]
+
+        for eject in eject_nodes:
+            for node in nodes:
+                if eject.ip == node.ip:
+                    ejected_nodes.append(node.id)
+                    break
+
+        rest.rebalance(otpNodes=[node.id for node in nodes],
+                       ejectedNodes=ejected_nodes)
+        self.sleep(3)
+        rest._rebalance_progress()
+        stopped = rest.stop_rebalance()
+        self.assertTrue(stopped, msg="unable to stop rebalance")
+
+        eject_nodes = non_master_nodes[:2]
+        ejected_nodes = []
+
+        for eject in eject_nodes:
+            for node in nodes:
+                if eject.ip == node.ip:
+                    ejected_nodes.append(node.id)
+                    break
+
+        rest.rebalance(otpNodes=[node.id for node in nodes],
+                       ejectedNodes=ejected_nodes)
+        rest.monitorRebalance()
+
+        self.create_fts_indexes_all_buckets()
+        self.sleep(10)
+        self.log.info("Index building has begun...")
+        for index in self._cb_cluster.get_indexes():
+            self.log.info("Index count for %s: %s"
+                          % (index.name, index.get_indexed_doc_count()))
+        self.wait_for_indexing_complete()
+        self.validate_index_count(equal_bucket_doc_count=True)

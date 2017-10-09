@@ -146,7 +146,6 @@ class INDEX_DEFAULTS:
         "sourceType": "couchbase",
         "sourceName": "default",
         "sourceUUID": "",
-        "sourceParams": SOURCE_CB_PARAMS,
         "planParams": {}
     }
 
@@ -230,9 +229,15 @@ class NodeHelper:
         if shell.extract_remote_info().type.lower() == OS.WINDOWS:
             time.sleep(wait_timeout * 5)
         else:
-            time.sleep(wait_timeout)
-        # disable firewall on these nodes
-        NodeHelper.disable_firewall(server)
+            time.sleep(wait_timeout/6)
+        while True:
+            try:
+                # disable firewall on these nodes
+                NodeHelper.disable_firewall(server)
+                break
+            except BaseException:
+                print "Node not reachable yet, will try after 10 secs"
+                time.sleep(10)
         # wait till server is ready after warmup
         ClusterOperationHelper.wait_for_ns_servers_or_assert(
             [server],
@@ -530,7 +535,6 @@ class FTSIndex:
             "sourceType": "couchbase",
             "sourceName": "default",
             "sourceUUID": "",
-            "sourceParams": INDEX_DEFAULTS.SOURCE_CB_PARAMS,
             "planParams": {}
         }
         self.name = self.index_definition['name'] = name
@@ -566,29 +570,36 @@ class FTSIndex:
                 self.build_custom_plan_params(plan_params)
 
         if source_params:
-            self.index_definition['sourceParams'] = \
-                self.build_source_params(source_params)
+            self.index_definition['sourceParams'] = {}
+            self.index_definition['sourceParams'] = source_params
 
         if source_uuid:
             self.index_definition['sourceUUID'] = source_uuid
 
-        if TestInputSingleton.input.param("kvstore", None):
-            self.index_definition['params']['store'] = {"kvStoreName":
-                            TestInputSingleton.input.param("kvstore", None)}
+        self.index_definition['params']['store'] = {
+            "kvStoreName": "mossStore",
+            "mossStoreOptions": {}
+        }
+
+        if TestInputSingleton.input.param("level_compaction", None):
+            self.index_definition['params']['store']['mossStoreOptions']= {
+                "CompactionLevelMaxSegments": 9,
+                "CompactionPercentage": 0.6,
+                "CompactionLevelMultiplier": 3
+            }
+
+        if TestInputSingleton.input.param("moss_compact_threshold", None):
+            self.index_definition['params']['store']\
+                ['mossStoreOptions']['CompactionPercentage'] = int(
+                    TestInputSingleton.input.param(
+                        "moss_compact_threshold",
+                        None)
+                    )
 
         if TestInputSingleton.input.param("memory_only", None):
             self.index_definition['params']['store'] = \
                 {"kvStoreName": "moss",
                  "mossLowerLevelStoreName": ""}
-
-        if TestInputSingleton.input.param("moss_compact_threshold", None):
-            self.index_definition['params']['store'] = \
-                {"mossStoreOptions": {
-                    "CompactionPercentage": int(TestInputSingleton.input.param(
-                        "moss_compact_threshold",
-                        None))
-                }
-                }
 
         self.moss_enabled = TestInputSingleton.input.param("moss", True)
         if not self.moss_enabled:
@@ -663,14 +674,6 @@ class FTSIndex:
         plan = INDEX_DEFAULTS.PLAN_PARAMS
         plan.update(plan_params)
         return plan
-
-    def build_source_params(self, source_params):
-        if self._source_type == "couchbase":
-            src_params = INDEX_DEFAULTS.SOURCE_CB_PARAMS
-        else:
-            src_params = INDEX_DEFAULTS.SOURCE_FILE_PARAMS
-        src_params.update(source_params)
-        return src_params
 
     def add_child_field_to_default_mapping(self, field_name, field_type,
                                            field_alias=None, analyzer=None):
@@ -2937,7 +2940,7 @@ class FTSBaseTest(unittest.TestCase):
         # simply append to this list, any error from log we want to fail test on
         self.__report_error_list = []
         if self.__fail_on_errors:
-            self.__report_error_list = []
+            self.__report_error_list = ["panic:"]
 
         # for format {ip1: {"panic": 2}}
         self.__error_count_dict = {}
@@ -3557,8 +3560,6 @@ class FTSBaseTest(unittest.TestCase):
             name=index_name,
             source_name=bucket.name,
             index_params=index_params,
-            source_params={"authUser": bucket.name,
-                           "authPassword": bucket_password},
             plan_params=plan_params)
         self.is_index_partitioned_balanced(index)
         return index

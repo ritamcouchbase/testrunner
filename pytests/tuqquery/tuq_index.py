@@ -1,10 +1,12 @@
+import math
+import time
 import uuid
-
-from membase.api.rest_client import RestConnection
-from tuq import ExplainPlanHelper
 from tuq import QueryTests
+from tuq import ExplainPlanHelper
 from tuq_join import JoinTests
-
+from remote.remote_util import RemoteMachineShellConnection
+from membase.api.rest_client import RestConnection
+from membase.api.exception import CBQError
 
 class QueriesViewsTests(QueryTests):
 
@@ -230,7 +232,7 @@ class QueriesViewsTests(QueryTests):
             self.query = "EXPLAIN SELECT * FROM %s" % (bucket.name)
             res = self.run_cbq_query()
             self.log.info(res)
-	    plan = ExplainPlanHelper(res)
+            plan = ExplainPlanHelper(res)
             self.assertTrue(plan["~children"][0]["index"] == "#primary",
                             "Type should be #primary, but is: %s" % plan)
 
@@ -251,7 +253,7 @@ class QueriesViewsTests(QueryTests):
                 self.query = 'EXPLAIN SELECT count(VMs) FROM %s ' % (bucket.name)
                 res = self.run_cbq_query()
                 self.log.info(res)
-		plan = ExplainPlanHelper(res)
+                plan = ExplainPlanHelper(res)
                 self.assertTrue(plan["~children"][0]["index"] == index_name,
                                 "Index should be %s, but is: %s" % (index_name, plan))
             finally:
@@ -270,7 +272,7 @@ class QueriesViewsTests(QueryTests):
                 self.query = 'EXPLAIN SELECT count(VMs) FROM %s GROUP BY VMs' % (bucket.name)
                 res = self.run_cbq_query()
                 self.log.info(res)
-		plan = ExplainPlanHelper(res)
+                plan = ExplainPlanHelper(res)
                 self.assertTrue(plan["~children"][0]["index"] == index_name,
                                 "Index should be %s, but is: %s" % (index_name, plan))
             finally:
@@ -288,7 +290,7 @@ class QueriesViewsTests(QueryTests):
                 self._wait_for_index_online(bucket, index_name)
                 self.query = 'EXPLAIN SELECT ARRAY vm.memory FOR vm IN VMs END AS vm_memories FROM %s' % (bucket.name)
                 res = self.run_cbq_query()
-		plan = ExplainPlanHelper(res)
+                plan = ExplainPlanHelper(res)
                 self.assertTrue(plan["~children"][0]["index"] == index_name,
                                 "Index should be %s, but is: %s" % (index_name, plan))
             finally:
@@ -306,7 +308,7 @@ class QueriesViewsTests(QueryTests):
                 self._wait_for_index_online(bucket, index_name)
                 self.query = 'EXPLAIN SELECT name FROM %s WHERE meta(%s).type = "json"' % (bucket.name, bucket.name)
                 res = self.run_cbq_query()
-		plan = ExplainPlanHelper(res)
+                plan = ExplainPlanHelper(res)
                 self.assertTrue(plan["~children"][0]["index"] == index_name,
                                 "Index should be %s, but is: %s" % (index_name, plan))
             finally:
@@ -417,14 +419,17 @@ class QueriesViewsTests(QueryTests):
                 self.assertTrue(self._is_index_in_list(bucket, idx1), "Index is not in list")
                 self.query = "EXPLAIN select %s.name from %s UNNEST VMs as x where any i in default.VMs satisfies i.memory > 9 END" % (bucket.name,bucket.name)
                 actual_result = self.run_cbq_query()
-		plan = ExplainPlanHelper(actual_result)
+                plan = ExplainPlanHelper(actual_result)
                 result1 =plan['~children'][0]['scan']['index']
                 self.assertTrue(result1==idx2)
                 self.query = "EXPLAIN select %s.name from %s UNNEST VMs as x where any i in default.VMs satisfies i.memory > 10 END" % (bucket.name,bucket.name)
                 actual_result = self.run_cbq_query()
-		plan = ExplainPlanHelper(actual_result)
-                result1 =plan['~children'][0]['scans'][0]['scan']['index']
-                self.assertTrue(result1==idx1 or result1==idx2)
+                plan = ExplainPlanHelper(actual_result)
+                result1 = plan['~children'][0]['scans'][0]['scan']['index']
+                result2 = plan['~children'][0]['scans'][1]['scan']['index']
+                self.assertTrue(result1==idx1 or result1 ==idx2)
+                self.assertTrue(result2==idx1 or result2 ==idx2)
+                self.assertTrue(result1 != result2)
             finally:
                 for idx in created_indexes:
                     self.query = "DROP INDEX %s.%s USING %s" % ("default", idx, self.index_type)
@@ -492,7 +497,7 @@ class QueriesViewsTests(QueryTests):
                 self._wait_for_index_online(bucket, index_name)
                 self.query = 'EXPLAIN select name, round(test_rate) as rate from %s WHERE round(test_rate) = 2' % (bucket.name, bucket.name)
                 res = self.run_cbq_query()
-		plan = ExplainPlanHelper(res)
+                plan = ExplainPlanHelper(res)
                 self.assertTrue(plan["~children"][0]["index"] == index_name,
                                 "Index should be %s, but is: %s" % (index_name, plan))
             finally:
@@ -512,7 +517,7 @@ class QueriesViewsTests(QueryTests):
                     self.query = "EXPLAIN SELECT * FROM %s WHERE %s = 'abc'" % (bucket.name, self.FIELDS_TO_INDEX[ind - 1])
                     res = self.run_cbq_query()
                     created_indexes.append(index_name)
-		    plan = ExplainPlanHelper(res)
+                    plan = ExplainPlanHelper(res)
                     self.assertTrue(plan["~children"][0]["index"] == index_name,
                                     "Index should be %s, but is: %s" % (index_name, plan))
             finally:
@@ -529,7 +534,7 @@ class QueriesViewsTests(QueryTests):
                 self._wait_for_index_online(bucket, index_name)
                 self.query = "EXPLAIN SELECT * FROM %s WHERE email = 'abc'" % (bucket.name)
                 res = self.run_cbq_query()
-		plan = ExplainPlanHelper(res)
+                plan = ExplainPlanHelper(res)
                 self.assertTrue(plan["~children"][0]["index"] != index_name,
                                 "Index should be %s, but is: %s" % (index_name, plan["~children"][0]["index"]))
             finally:
@@ -550,7 +555,7 @@ class QueriesViewsTests(QueryTests):
                     created_indexes.append(index_name)
                     self.query = "EXPLAIN SELECT COUNT(%s) FROM %s" % (self.FIELDS_TO_INDEX[ind - 1], bucket.name)
                     res = self.run_cbq_query()
-		    plan = ExplainPlanHelper(res)
+                    plan = ExplainPlanHelper(res)
                     self.assertTrue(plan["~children"][0]["index"] == index_name,
                                     "Index should be %s, but is: %s" % (index_name, plan["~children"][0]["index"]))
             finally:
@@ -572,7 +577,7 @@ class QueriesViewsTests(QueryTests):
                     created_indexes.append(index_name)
                     self.query = "EXPLAIN SELECT SUM(%s) FROM %s" % (self.FIELDS_TO_INDEX[ind - 1], bucket.name)
                     res = self.run_cbq_query()
-		    plan = ExplainPlanHelper(res)
+                    plan = ExplainPlanHelper(res)
                     self.assertTrue(plan["~children"][0]["index"] == index_name,
                                     "Index should be %s, but is: %s" % (index_name, plan["~children"][0]["index"]))
             finally:
@@ -594,7 +599,7 @@ class QueriesViewsTests(QueryTests):
                     created_indexes.append(index_name)
                     self.query = "EXPLAIN SELECT employee.name, new_task.project FROM %s as employee JOIN %s as new_task" % (bucket.name, bucket.name)
                     res = self.run_cbq_query()
-		    plan = ExplainPlanHelper(res)
+                    plan = ExplainPlanHelper(res)
                     self.assertTrue(plan["~children"][0]["index"] == index_name,
                                     "Index should be %s, but is: %s" % (index_name, plan["~children"][0]["index"]))
             finally:
@@ -616,7 +621,7 @@ class QueriesViewsTests(QueryTests):
                     created_indexes.append(index_name)
                     self.query = "EXPLAIN SELECT emp.name, task FROM %s emp UNNEST emp.tasks_ids task" % (bucket.name)
                     res = self.run_cbq_query()
-		    plan = ExplainPlanHelper(res)
+                    plan = ExplainPlanHelper(res)
                     self.assertTrue(plan["~children"][0]["index"] == index_name,
                                     "Index should be %s, but is: %s" % (index_name, plan["~children"][0]["index"]))
             finally:
@@ -638,7 +643,7 @@ class QueriesViewsTests(QueryTests):
                     created_indexes.append(index_name)
                     self.query = "EXPLAIN select task_name, (select sum(test_rate) cn from %s use keys ['query-1'] where join_day>2) as names from %s" % (bucket.name, bucket.name)
                     res = self.run_cbq_query()
-		    plan = ExplainPlanHelper(res)
+                    plan = ExplainPlanHelper(res)
                     self.assertTrue(plan["~children"][0]["index"] == index_name,
                                     "Index should be %s, but is: %s" % (index_name, plan))
             finally:
@@ -658,7 +663,7 @@ class QueriesViewsTests(QueryTests):
                 self.query = 'EXPLAIN SELECT VMs FROM %s ' % (bucket.name) + \
                         'WHERE ANY vm IN VMs SATISFIES vm.RAM > 5 AND vm.os = "ubuntu" end'
                 res = self.run_cbq_query()
-		plan = ExplainPlanHelper(res)
+                plan = ExplainPlanHelper(res)
                 self.assertTrue(plan["~children"][0]["index"] == index_name,
                                 "Index should be %s, but is: %s" % (index_name, plan))
             finally:
@@ -677,7 +682,7 @@ class QueriesViewsTests(QueryTests):
                 self.query = 'EXPLAIN SELECT tasks_points.task1 AS task from %s ' % (bucket.name) + \
                              'WHERE tasks_points > 0'
                 res = self.run_cbq_query()
-		plan = ExplainPlanHelper(res)
+                plan = ExplainPlanHelper(res)
                 self.assertTrue(plan["~children"][0]["index"] == index_name,
                                 "Index should be %s, but is: %s" % (index_name, plan))
             finally:
@@ -696,7 +701,7 @@ class QueriesViewsTests(QueryTests):
                 self.query = 'EXPLAIN SELECT tasks_points.task1 AS task from %s ' % (bucket.name) + \
                              'WHERE tasks_points.task1 > 0'
                 res = self.run_cbq_query()
-		plan = ExplainPlanHelper(res)
+                plan = ExplainPlanHelper(res)
                 self.assertTrue(plan["~children"][0]["index"] == index_name,
                                 "Index should be %s, but is: %s" % (index_name, plan))
             finally:
@@ -715,7 +720,7 @@ class QueriesViewsTests(QueryTests):
                 self.query = 'EXPLAIN SELECT DISTINCT skills[0] as skill' + \
                          ' FROM %s WHERE skills[0] = "abc"' % (bucket.name)
                 res = self.run_cbq_query()
-		plan = ExplainPlanHelper(res)
+                plan = ExplainPlanHelper(res)
                 self.assertTrue(plan["~children"][0]["index"] == index_name,
                                 "Index should be %s, but is: %s" % (index_name, plan))
             finally:
@@ -734,7 +739,7 @@ class QueriesViewsTests(QueryTests):
                 self.query = 'EXPLAIN SELECT DISTINCT skills[0] as skill' + \
                          ' FROM %s WHERE skill[0] = "skill2010"' % (bucket.name)
                 res = self.run_cbq_query()
-		plan = ExplainPlanHelper(res)
+                plan = ExplainPlanHelper(res)
                 self.assertTrue(plan["~children"][0]["index"] == index_name,
                                 "Index should be %s, but is: %s" % (index_name, plan))
             finally:
@@ -757,7 +762,7 @@ class QueriesViewsTests(QueryTests):
                                                                                                       bucket.name,
                                                                                                       self.FIELDS_TO_INDEX[ind - 1])
                     res = self.run_cbq_query()
-		    plan = ExplainPlanHelper(res)
+                    plan = ExplainPlanHelper(res)
                     self.assertTrue(plan["~children"][0]["index"] == index_name,
                                     "Index should be %s, but is: %s" % (index_name, plan))
             finally:
@@ -810,7 +815,7 @@ class QueriesViewsTests(QueryTests):
                 for ind in created_indexes:
                     self.query = 'EXPLAIN SELECT name, join_day, join_mo FROM %s  USE INDEX(%s using %s) WHERE join_day>2 AND join_mo>3' % (bucket.name, ind, self.index_type)
                     res = self.run_cbq_query()
-		    plan = ExplainPlanHelper(res)
+                    plan = ExplainPlanHelper(res)
                     self.assertTrue(plan["~children"][0]["index"] == ind,
                                     "Index should be %s, but is: %s" % (ind, plan))
             finally:
@@ -871,7 +876,7 @@ class QueriesViewsTests(QueryTests):
                                  "HAVING SUM(employees.test_rate) > 0 and " +\
                                  "SUM(test_rate) < 100000"
                     res = self.run_cbq_query()
-		    plan = ExplainPlanHelper(res)
+                    plan = ExplainPlanHelper(res)
                     self.assertTrue(plan["~children"][0]["index"] == ind,
                                     "Index should be %s, but is: %s" % (ind, plan))
             finally:
@@ -906,7 +911,7 @@ class QueriesViewsTests(QueryTests):
                     self._verify_results(sorted(res['results']), sorted(expected_result))
                     self.query = 'EXPLAIN SELECT name, join_day, join_mo FROM %s WHERE join_day>2 AND join_mo>3' % (bucket.name)
                     res = self.run_cbq_query()
-		    plan = ExplainPlanHelper(res)
+                    plan = ExplainPlanHelper(res)
                     self.assertTrue(plan["~children"][0]["index"] == ind_name,
                                     "Index should be %s, but is: %s" % (ind_name, plan))
             finally:
@@ -938,12 +943,11 @@ class QueriesViewsTests(QueryTests):
                     full_list = self.generate_full_docs_list(self.gens_load)
                     expected_result = [{"name" : doc['name'], "join_yr" : doc['join_yr'], "join_day" : doc["join_day"]}
                                        for doc in full_list if doc['join_yr'] > 3]
-                    #import pdb;pdb.set_trace()
                     self._verify_results(sorted(res['results']), sorted(expected_result))
                     #self.assertTrue(len(res['results'])==10)
                     self.query = 'EXPLAIN SELECT name, join_day, join_yr FROM %s WHERE join_yr>3' % (bucket.name)
                     res = self.run_cbq_query()
-		    plan = ExplainPlanHelper(res)
+                    plan = ExplainPlanHelper(res)
                     self.assertTrue(plan["~children"][0]["index"] != '%s_%s' % (index_name_prefix, attr),
                                     "Index should be %s_%s, but is: %s" % (index_name_prefix, attr, plan))
             finally:
@@ -1116,7 +1120,7 @@ class QueriesViewsTests(QueryTests):
                 self.run_cbq_query()
                 query = 'EXPLAIN ' % (self.query % (bucket.name, bucket.name, bucket.name))
                 res = self.run_cbq_query(query=query)
-		plan = ExplainPlanHelper(res)
+                plan = ExplainPlanHelper(res)
                 self.assertTrue(plan["~children"][0]["~children"][0]["#operator"] == 'IntersectScan',
                                         "Index should be intersect scan and is %s" % (plan))
                 actual_indexes = [scan['index'] for scan in plan["~children"][0]["~children"][0]['scans']]
@@ -1155,15 +1159,11 @@ class QueriesViewsTests(QueryTests):
                 query_temp = query_temp % bucket.name
             query = 'EXPLAIN %s' % (query_temp)
             res = self.run_cbq_query(query=query)
-
-	    plan = ExplainPlanHelper(res)
-            print plan
+            plan = ExplainPlanHelper(res)
             self.log.info('-'*100)
             if (query.find("CREATE INDEX") < 0):
                 result = plan["~children"][0]["~children"][0] if "~children" in plan["~children"][0] \
                         else plan["~children"][0]
-                print result
-                #import pdb;pdb.set_trace()
                 if not(result['scans'][0]['#operator']=='DistinctScan'):
                     if not (result["#operator"] == 'UnionScan'):
                         self.assertTrue(result["#operator"] == 'IntersectScan',
@@ -1184,11 +1184,7 @@ class QueriesViewsTests(QueryTests):
                     else:
                         actual_indexes = [scan['index'] if scan['#operator'] == 'IndexScan' else scan['scan']['index'] if scan['#operator'] == 'DistinctScan' else scan['index']
                                 for scan in result['scans']]
-
-                    print actual_indexes
-
                     actual_indexes = [x.encode('UTF8') for x in actual_indexes]
-
                     self.log.info('actual indexes "{0}"'.format(actual_indexes))
                     self.log.info('compared against "{0}"'.format(indexes_names))
                     self.assertTrue(set(actual_indexes) == set(indexes_names),"Indexes should be %s, but are: %s" % (indexes_names, actual_indexes))

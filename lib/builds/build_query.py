@@ -1,27 +1,26 @@
 #this class will contain methods which we
 #use later to
 # map a version # -> rpm url
+from datetime import datetime
+import time
+import urllib2
 import re
 import socket
-import sys
-import time
-import traceback
-import urllib2
-from datetime import datetime
-
 import BeautifulSoup
-import logger
 import testconstants
-from testconstants import CB_LATESTBUILDS_REPO
-from testconstants import CB_RELEASE_REPO
-from testconstants import CE_EE_ON_SAME_FOLDER
-from testconstants import COUCHBASE_FROM_VERSION_3
-from testconstants import COUCHBASE_RELEASE_FROM_VERSION_3
-from testconstants import COUCHBASE_VERSION_2
-from testconstants import COUCHBASE_VERSION_2_WITH_REL
-from testconstants import COUCHBASE_VERSION_3
-from testconstants import SHERLOCK_VERSION
+import logger
+import traceback
+import sys
 from testconstants import WIN_CB_VERSION_3
+from testconstants import SHERLOCK_VERSION
+from testconstants import COUCHBASE_VERSION_2
+from testconstants import COUCHBASE_VERSION_3
+from testconstants import COUCHBASE_VERSION_2_WITH_REL
+from testconstants import COUCHBASE_RELEASE_FROM_VERSION_3
+from testconstants import COUCHBASE_FROM_VERSION_3, COUCHBASE_FROM_SPOCK
+from testconstants import CB_RELEASE_REPO
+from testconstants import CB_LATESTBUILDS_REPO
+from testconstants import CE_EE_ON_SAME_FOLDER
 
 
 class MembaseBuild(object):
@@ -594,7 +593,7 @@ class BuildQuery(object):
             if any( x + "-" in build_info for x in COUCHBASE_FROM_VERSION_3):
                 deb_words = ["debian7", "debian8", "ubuntu12.04", "ubuntu14.04",
                              "ubuntu16.04", "windows", "macos"]
-                if "centos" not in build_info:
+                if "centos" not in build_info and "suse" not in build_info:
                     tmp_str = build_info.split("_")
                     product_version = tmp_str[1].split("-")
                     product_version = "-".join([i for i in product_version \
@@ -604,13 +603,13 @@ class BuildQuery(object):
                     product_version = product_version[3] + "-" + product_version[4]
                 if product_version[:5] in testconstants.COUCHBASE_VERSIONS:
                     build.product_version = product_version
-                    if "centos" not in build_info:
+                    if "centos" not in build_info and "suse" not in build_info:
                         build_info = build_info.replace("_" + product_version,"")
                     else:
                         build_info = build_info.replace("-" + product_version,"")
                 if "x86_64" in build_info:
                     build.architecture_type = "x86_64"
-                    if "centos" in build_info:
+                    if "centos" in build_info or "suse" in build_info:
                         build_info = build_info.replace(".x86_64", "")
                     elif "macos" in build_info:
                         build_info = build_info.replace("_x86_64", "")
@@ -623,9 +622,9 @@ class BuildQuery(object):
                 elif "-amd64" in build_info:
                     build.architecture_type = "x86_64"
                     build_info = build_info.replace("-amd64", "")
-                del_words = ["centos6", "debian7", "debian8", "ubuntu12.04",
-                             "ubuntu14.04", "ubuntu16.04", "windows", "macos",
-                             "centos7"]
+                del_words = ["centos6", "debian7", "debian8", "debian9",
+                             "ubuntu12.04", "ubuntu14.04", "ubuntu16.04",
+                             "windows", "macos", "centos7", "suse11", "suse12"]
                 if build_info.startswith("couchbase-server"):
                     build.product = build_info.split("-")
                     build.product = "-".join([i for i in build.product \
@@ -734,7 +733,11 @@ class BuildQuery(object):
                     build.architecture_type = "amd64"
                 elif "x86" in architecture_type:
                     build.architecture_type = "x86"
-            if "-" in version and int(version.split("-")[1]) >= 2924:
+            """
+                    In spock from build 2924 and later release, we only support
+                    msi installation method on windows
+            """
+            if "-" in version and version.split("-")[0] in COUCHBASE_FROM_SPOCK:
                 deliverable_type = "msi"
 
         if "deb" in deliverable_type and "centos6" in edition_type:
@@ -777,9 +780,13 @@ class BuildQuery(object):
                    "-" + centos_version + "." + build.architecture_type + \
                    "." + build.deliverable_type
             elif "suse" in distribution_version:
-                if "suse linux enterprise server 12" in distribution_version:
-                    suse_version="suse12"
-                    build.distribution_version = "suse12"
+                if "suse 12" in distribution_version:
+                    if version[:5] in COUCHBASE_FROM_SPOCK:
+                        suse_version="suse12"
+                        build.distribution_version = "suse12"
+                    else:
+                        self.fail("suse 12 does not support on this version %s "
+                                                                  % version[:5])
                 else:
                     suse_version="suse11"
                     build.distribution_version = "suse11"
@@ -810,6 +817,9 @@ class BuildQuery(object):
                 elif "debian gnu/linux 8" in distribution_version:
                     build.distribution_version = "debian8"
                     os_name = "debian8"
+                elif "debian gnu/linux 9" in distribution_version:
+                    build.distribution_version = "debian9"
+                    os_name = "debian9"
                 elif "windows" in distribution_version:
                     os_name = "windows"
                     if "x86_64" not in architecture_type:

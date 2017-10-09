@@ -2,12 +2,13 @@ import copy
 import json
 from threading import Thread
 
+from membase.helper.cluster_helper import ClusterOperationHelper
+from remote.remote_util import RemoteMachineShellConnection
+
 from TestInput import TestInputSingleton
 from fts_base import FTSBaseTest
 from lib.membase.api.exception import FTSException, ServerUnavailableException
 from lib.membase.api.rest_client import RestConnection
-from membase.helper.cluster_helper import ClusterOperationHelper
-from remote.remote_util import RemoteMachineShellConnection
 
 
 class StableTopFTS(FTSBaseTest):
@@ -244,14 +245,12 @@ class StableTopFTS(FTSBaseTest):
         # create "emp" bucket
         self._cb_cluster.create_standard_buckets(bucket_size=1000,
                                                  name="emp",
-                                                 port=11234,
                                                  num_replicas=0)
         emp = self._cb_cluster.get_bucket_by_name('emp')
 
         # create "wiki" bucket
         self._cb_cluster.create_standard_buckets(bucket_size=1000,
                                                  name="wiki",
-                                                 port=11235,
                                                  num_replicas=0)
         wiki = self._cb_cluster.get_bucket_by_name('wiki')
 
@@ -421,7 +420,6 @@ class StableTopFTS(FTSBaseTest):
                                                 stat_name='num_recs_to_persist')
         self.log.info("Data(metadata + docs) in write queue is {0}".
                       format(stat_value))
-        self.partitions_per_pindex = 2
         new_plan_param = self.construct_plan_params()
         index.index_definition['planParams'] = \
             index.build_custom_plan_params(new_plan_param)
@@ -499,7 +497,9 @@ class StableTopFTS(FTSBaseTest):
         index = self.create_index(
             bucket=self._cb_cluster.get_bucket_by_name('default'),
             index_name="custom_index")
-        self.create_es_index_mapping(index.es_custom_map, index.index_definition)
+        if self.es:
+            self.create_es_index_mapping(index.es_custom_map,
+                                         index.index_definition)
         self.load_data()
         self.wait_for_indexing_complete()
         if self._update or self._delete:
@@ -906,11 +906,11 @@ class StableTopFTS(FTSBaseTest):
         self.sleep(15)
         self.wait_for_indexing_complete()
         zero_results_ok = False
-        expected_hits = 3
+        expected_hits = 5
 
-        # Run Query w/o Boosting and compare the scores for Docs emp10000071 &
-        # emp10000042. Should be the same
-        query = {"match": "Marketing", "field": "dept"}
+        # Run Query w/o Boosting and compare the scores for Docs emp10000086 &
+        # emp10000021. Should be the same
+        query = {"query": "dept:Marketing name:Safiya"}
         if isinstance(query, str):
             query = json.loads(query)
         zero_results_ok = True
@@ -942,33 +942,30 @@ class StableTopFTS(FTSBaseTest):
 
         # Run Query w/o Boosting and compare the scores for Docs emp10000021 &
         # emp10000086. emp10000021 score should have improved w.r.t. emp10000086
-        query = {"match": "Marketing^2", "field": "dept"}
+        query = {"query": "dept:Marketing^5 name:Safiya"}
         if isinstance(query, str):
             query = json.loads(query)
         zero_results_ok = True
-        try:
-            for index in self._cb_cluster.get_indexes():
-                hits, contents, _, _ = index.execute_query(query,
-                                                           zero_results_ok=zero_results_ok,
-                                                           expected_hits=expected_hits,
-                                                           return_raw_hits=True)
-                self.log.info("Hits: %s" % hits)
-                self.log.info("Contents: %s" % contents)
-                score_after_boosting_doc1 = index.get_score_from_query_result_content(
-                    contents=contents, doc_id=u'emp10000021')
-                score_after_boosting_doc2 = index.get_score_from_query_result_content(
-                    contents=contents, doc_id=u'emp10000086')
+        for index in self._cb_cluster.get_indexes():
+            hits, contents, _, _ = index.execute_query(query,
+                                                       zero_results_ok=zero_results_ok,
+                                                       expected_hits=expected_hits,
+                                                       return_raw_hits=True)
+            self.log.info("Hits: %s" % hits)
+            self.log.info("Contents: %s" % contents)
+            score_after_boosting_doc1 = index.get_score_from_query_result_content(
+                contents=contents, doc_id=u'emp10000021')
+            score_after_boosting_doc2 = index.get_score_from_query_result_content(
+                contents=contents, doc_id=u'emp10000086')
 
-                self.log.info("Scores after boosting:")
-                self.log.info("")
-                self.log.info("emp10000021: %s", score_after_boosting_doc1)
-                self.log.info("emp10000086: %s", score_after_boosting_doc2)
-        except Exception as err:
-            self.log.error(err)
-            self.fail("Testcase failed: " + err.message)
+            self.log.info("Scores after boosting:")
+            self.log.info("")
+            self.log.info("emp10000021: %s", score_after_boosting_doc1)
+            self.log.info("emp10000086: %s", score_after_boosting_doc2)
+            assert score_after_boosting_doc1 == score_after_boosting_doc2
+            assert score_before_boosting_doc1 < score_after_boosting_doc1
+            assert score_before_boosting_doc2 < score_after_boosting_doc2
 
-        if not score_after_boosting_doc1 > score_after_boosting_doc2:
-            self.fail("Testcase failed: Boosting didn't improve score for emp10000021 w.r.t emp10000086")
 
     def test_doc_id_query_type(self):
         # Create bucket, create index
@@ -1721,9 +1718,7 @@ class StableTopFTS(FTSBaseTest):
         index = self._cb_cluster.create_fts_index(
             name='default_index',
             source_name='default',
-            source_params={"authUser": 'default',
-                           "authPassword": '',
-                           "includeXAttrs": True})
+            source_params={"includeXAttrs": True})
         self.is_index_partitioned_balanced(index)
         self.wait_for_indexing_complete()
         if self._update or self._delete:
@@ -1740,11 +1735,10 @@ class StableTopFTS(FTSBaseTest):
         :return: Nothing
         """
         fts_ssl_port=18094
-        import json, subprocess
+        import json, os, subprocess
         idx = {"sourceName": "default",
                "sourceType": "couchbase",
-               "type": "fulltext-index",
-               "sourceParams": {"authUser": "default"}}
+               "type": "fulltext-index"}
 
         qry = {"indexName": "default_index_1",
                  "query": {"field": "type", "match": "emp"},

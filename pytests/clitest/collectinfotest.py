@@ -2,7 +2,8 @@ import subprocess, time, os
 from subprocess import call
 from clitest.cli_base import CliBaseTest
 from couchbase_helper.documentgenerator import BlobGenerator
-from membase.api.rest_client import RestConnection
+from membase.api.rest_client import RestConnection, RestHelper
+
 from couchbase_helper.document import View
 
 LOG_FILE_NAME_LIST = ["couchbase.log", "diag.log", "ddocs.log", "ini.log", "syslog.tar.gz",
@@ -87,12 +88,14 @@ class CollectinfoTests(CliBaseTest):
                     if self.node_down:
                         self.shell.start_server()
                     raise Exception("Command throw out error: %s " % output_line)
-        self.verify_results(self, self.log_filename)
-
-        if self.node_down:
-            if self.os == 'linux':
-                self.shell.start_server()
-                self.sleep(self.wait_timeout)
+        try:
+            self.verify_results(self, self.log_filename)
+        finally:
+            if self.node_down:
+                if self.os == 'linux':
+                    self.shell.start_server()
+                    rest = RestConnection(self.master)
+                    RestHelper(rest).is_ns_server_running(timeout_in_seconds=60)
 
     def test_cbcollectinfo_detect_container(self):
         """ this test only runs inside docker host and
@@ -127,13 +130,15 @@ class CollectinfoTests(CliBaseTest):
             if os == "linux":
                 command = "unzip %s" % (zip_file)
                 output, error = self.shell.execute_command(command)
-                self.shell.log_command_output(output, error)
+                if self.debug_logs:
+                    self.shell.log_command_output(output, error)
                 if len(error) > 0:
                     raise Exception("unable to unzip the files. Check unzip command output for help")
 
                 command = "ls cbcollect_info*/"
                 output, error = self.shell.execute_command(command)
-                self.shell.log_command_output(output, error)
+                if self.debug_logs:
+                    self.shell.log_command_output(output, error)
                 if len(error) > 0:
                     raise Exception("unable to list the files. Check ls command output for help")
                 missing_logs = False
@@ -157,7 +162,8 @@ class CollectinfoTests(CliBaseTest):
                     for bucket in self.buckets:
                         command = "grep %s cbcollect_info*/stats.log" % (bucket.name)
                         output, error = self.shell.execute_command(command)
-                        self.shell.log_command_output(output, error)
+                        if self.debug_logs:
+                            self.shell.log_command_output(output, error)
                         if len(error) > 0:
                             raise Exception("unable to grep key words. Check grep command output for help")
                         if len(output) == 0:
@@ -166,16 +172,22 @@ class CollectinfoTests(CliBaseTest):
 
                 command = "du -s cbcollect_info*/*"
                 output, error = self.shell.execute_command(command)
-                self.shell.log_command_output(output, error)
+                if self.debug_logs:
+                    self.shell.log_command_output(output, error)
                 empty_logs = False
                 if len(error) > 0:
                     raise Exception("unable to list file size. Check du command output for help")
                 for output_line in output:
                     output_line = output_line.split()
                     file_size = int(output_line[0])
+                    if self.debug_logs:
+                        print "File size: ", file_size
                     if file_size == 0:
-                        empty_logs = True
-                        self.log.error("%s is empty" % (output_line[1]))
+                        if "kv_trace" in output_line[1] and self.node_down:
+                            continue
+                        else:
+                            empty_logs = True
+                            self.log.error("%s is empty" % (output_line[1]))
 
                 if missing_logs:
                     raise Exception("Bad log file package generated. Missing logs")

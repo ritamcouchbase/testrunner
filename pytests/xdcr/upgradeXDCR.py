@@ -1,17 +1,21 @@
-import Queue
-import copy
+from threading import Thread
 import re
-
-from TestInput import TestInputSingleton
-from couchbase_helper.document import DesignDocument, View
-from couchbase_helper.documentgenerator import BlobGenerator
-from membase.api.rest_client import RestConnection
-from membase.helper.cluster_helper import ClusterOperationHelper
+import copy
+import Queue
+from datetime import datetime
+from membase.api.rest_client import RestConnection, Bucket
 from newupgradebasetest import NewUpgradeBaseTest
-from remote.remote_util import RemoteMachineShellConnection
-from testconstants import STANDARD_BUCKET_PORT
 from xdcrnewbasetests import XDCRNewBaseTest, NodeHelper
-
+from TestInput import TestInputSingleton
+from remote.remote_util import RemoteMachineShellConnection
+from membase.api.rest_client import RestConnection, RestHelper
+from membase.api.exception import RebalanceFailedException
+from membase.helper.cluster_helper import ClusterOperationHelper
+from couchbase_helper.documentgenerator import BlobGenerator
+from remote.remote_util import RemoteMachineShellConnection
+from couchbase_helper.document import DesignDocument, View
+from testconstants import STANDARD_BUCKET_PORT
+from security.rbac_base import RbacBase
 
 class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
     def setUp(self):
@@ -75,18 +79,27 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
             buckets = self.buckets_on_dest
         bucket_size = self._get_bucket_size(cluster.get_mem_quota(), len(buckets))
 
+        bucket_params = cluster._create_bucket_params(self, size=bucket_size,
+                                                      replicas=self.num_replicas)
+
         if "default" in buckets:
-            bucket_params = XDCRNewBaseTest._create_bucket_params(self, size=bucket_size,
-                                                              replicas=self.num_replicas)
-            cluster.create_default_bucket(bucket_params)
+            cluster.create_default_bucket(bucket_size=bucket_params['size'], num_replicas=bucket_params['replicas'],
+                                          eviction_policy=bucket_params['eviction_policy'],
+                                          bucket_priority=bucket_params['bucket_priority'], lww=bucket_params['lww'])
 
         sasl_buckets = len([bucket for bucket in buckets if bucket.startswith("sasl")])
         if sasl_buckets > 0:
-            cluster.create_sasl_buckets(bucket_size, num_buckets=sasl_buckets)
+            cluster.create_sasl_buckets(bucket_size=bucket_params['size'], num_buckets=sasl_buckets,
+                                        num_replicas=bucket_params['replicas'],
+                                        eviction_policy=bucket_params['eviction_policy'],
+                                        bucket_priority=bucket_params['bucket_priority'], lww=bucket_params['lww'])
 
         standard_buckets = len([bucket for bucket in buckets if bucket.startswith("standard")])
         if standard_buckets > 0:
-            cluster.create_standard_buckets(bucket_size, num_buckets=standard_buckets)
+            cluster.create_standard_buckets(bucket_size=bucket_params['size'], num_buckets=standard_buckets,
+                                            num_replicas=bucket_params['replicas'],
+                                            eviction_policy=bucket_params['eviction_policy'],
+                                            bucket_priority=bucket_params['bucket_priority'], lww=bucket_params['lww'])
 
 
     def _join_all_clusters(self):
@@ -147,7 +160,9 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
         self.cluster.rebalance(update_servers + extra_servers, [], update_servers)
 
     def offline_cluster_upgrade(self):
-
+        if self.initial_version[:3] >= self.upgrade_versions[0][:3]:
+            self.log.info("Initial version greater than upgrade version - not supported")
+            return
         # install on src and dest nodes
         self._install(self.servers[:self.src_init + self.dest_init ])
         upgrade_nodes = self.input.param('upgrade_nodes', "src").split(";")
@@ -178,6 +193,39 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
             nodes_to_upgrade += self.dest_nodes
 
         self._offline_upgrade(nodes_to_upgrade)
+
+        if self.upgrade_versions[0][:3] >= 5.0:
+            if "src" in upgrade_nodes:
+                # Add built-in user to C1
+                testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
+                RbacBase().create_user_source(testuser, 'builtin',
+                                              self.src_master)
+
+                self.sleep(10)
+
+                # Assign user to role
+                role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
+                RbacBase().add_user_role(role_list,
+                                         RestConnection(self.src_master),
+                                         'builtin')
+
+                self.sleep(10)
+
+            if "dest" in upgrade_nodes:
+                # Add built-in user to C2
+                testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
+                RbacBase().create_user_source(testuser, 'builtin',
+                                              self.dest_master)
+
+                self.sleep(10)
+
+                # Assign user to role
+                role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
+                RbacBase().add_user_role(role_list,
+                                         RestConnection(self.dest_master),
+                                         'builtin')
+
+                self.sleep(10)
 
         self.log.info("######### Upgrade of C1 and C2 completed ##########")
 
@@ -302,6 +350,9 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
         return True
 
     def online_cluster_upgrade(self):
+        if self.initial_version[:3] >= self.upgrade_versions[0][:3]:
+            self.log.info("Initial version greater than upgrade version - not supported")
+            return
         self._install(self.servers[:self.src_init + self.dest_init])
         prev_initial_version = self.initial_version
         self.initial_version = self.upgrade_versions[0]
@@ -335,6 +386,22 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
         if not self.is_goxdcr_migration_successful(self.src_master):
             self.fail("C1: Metadata migration failed after old nodes were removed")
 
+        if self.upgrade_versions[0][:3] >= 5.0:
+            # Add built-in user to C1
+            testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
+            RbacBase().create_user_source(testuser, 'builtin',
+                                            self.src_master)
+
+            self.sleep(10)
+
+            # Assign user to role
+            role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
+            RbacBase().add_user_role(role_list,
+                                        RestConnection(self.src_master),
+                                        'builtin')
+
+            self.sleep(10)
+
         self._load_bucket(bucket_standard, self.dest_master, self.gen_create, 'create', exp=0)
         self._load_bucket(bucket_default, self.src_master, self.gen_update, 'create', exp=self._expires)
         self._load_bucket(bucket_sasl, self.src_master, self.gen_update, 'create', exp=self._expires)
@@ -366,6 +433,22 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
         self._online_upgrade(self.servers[self.src_init + self.dest_init:], self.dest_nodes, False)
         self.dest_master = self.servers[self.src_init]
 
+        if self.upgrade_versions[0][:3] >= 5.0:
+            # Add built-in user to C2
+            testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
+            RbacBase().create_user_source(testuser, 'builtin',
+                                          self.dest_master)
+
+            self.sleep(10)
+
+            # Assign user to role
+            role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
+            RbacBase().add_user_role(role_list,
+                                     RestConnection(self.dest_master),
+                                     'builtin')
+
+            self.sleep(10)
+
         self.log.info("###### Upgrading C2: completed ######")
 
         if self.pause_xdcr_cluster:
@@ -378,7 +461,7 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
         self._load_bucket(bucket_standard, self.dest_master, self.gen_delete, 'delete', exp=0)
         self._load_bucket(bucket_sasl_2, self.dest_master, gen_delete2, 'delete', exp=0)
 
-        self._wait_for_replication_to_catchup()
+        self._wait_for_replication_to_catchup(timeout=600)
         self._post_upgrade_ops()
         self.sleep(120)
         self.verify_results()
@@ -438,6 +521,9 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
                                         "error message not found as expected in " + str(node.ip))
 
     def incremental_offline_upgrade(self):
+        if self.initial_version[:3] >= self.upgrade_versions[0][:3]:
+            self.log.info("Initial version greater than upgrade version - not supported")
+            return
         upgrade_seq = self.input.param("upgrade_seq", "src>dest")
         self._install(self.servers[:self.src_init + self.dest_init ])
         self.create_buckets()
@@ -468,6 +554,36 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
         for _seq, node in enumerate(nodes_to_upgrade):
             self._offline_upgrade([node])
             self.sleep(60)
+            if self.upgrade_versions[0][:3] >= 5.0:
+                # Add built-in user to C1
+                testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
+                RbacBase().create_user_source(testuser, 'builtin',
+                                              self.src_master)
+
+                self.sleep(10)
+
+                # Assign user to role
+                role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
+                RbacBase().add_user_role(role_list,
+                                         RestConnection(self.src_master),
+                                         'builtin')
+
+                self.sleep(10)
+
+                # Add built-in user to C2
+                testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
+                RbacBase().create_user_source(testuser, 'builtin',
+                                              self.dest_master)
+
+                self.sleep(10)
+
+                # Assign user to role
+                role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
+                RbacBase().add_user_role(role_list,
+                                         RestConnection(self.dest_master),
+                                         'builtin')
+
+                self.sleep(10)
             bucket = self.src_cluster.get_bucket_by_name('sasl_bucket_1')
             itemPrefix = "loadThree" + _seq * 'a'
             gen_create3 = BlobGenerator(itemPrefix, itemPrefix, self._value_size, end=self.num_items)
@@ -476,7 +592,8 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
             itemPrefix = "loadFour" + _seq * 'a'
             gen_create4 = BlobGenerator(itemPrefix, itemPrefix, self._value_size, end=self.num_items)
             self._load_bucket(bucket, self.src_master, gen_create4, 'create', exp=0)
-            self._wait_for_replication_to_catchup()
+
+        self._wait_for_replication_to_catchup(timeout=600)
         self.merge_all_buckets()
         self.verify_results()
         self.sleep(self.wait_timeout * 5, "Let clusters work for some time")
@@ -616,6 +733,9 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
     def test_backward_compatibility(self):
         self.c1_version = self.initial_version
         self.c2_version = self.upgrade_versions[0]
+        if self.c1_version[:3] >= self.c2_version[:3]:
+            self.log.info("Initial version greater than upgrade version - not supported")
+            return
         # install older version on C1
         self._install(self.servers[:self.src_init])
         #install latest version on C2

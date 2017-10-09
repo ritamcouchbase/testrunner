@@ -186,11 +186,7 @@ class JoinTests(QueryTests):
             self.query = 'SELECT meta(b1).id b1id, b2 from default b1 JOIN default b2 ON KEY b2.docid FOR b1 WHERE meta(b1).id > ""'
             actual_result=self.run_cbq_query()
             self.assertTrue(actual_result['results']==[{u'b1id': u'w001', u'b2': {u'phones': [u'123-456-7890', u'123-456-7891'], u'type': u'pdoc', u'docid': u'w001', u'name': u'pdoc', u'altid': u'w001'}}])
-            self.query='SELECT meta(b1).id b1id FROM default b1 JOIN default b2 ON KEY b2.altid FOR b1 WHERE meta(b1).id > ""'
-            #enhancement
-            #actual_result=self.run_cbq_query()
-            #print actual_result
-            #right side should not use covered index
+
             self.query = 'explain SELECT meta(b1).id b1id from default b1 NEST default b2 ON KEY b2.docid FOR b1 WHERE meta(b1).id > ""'
             actual_result=self.run_cbq_query()
             self.assertTrue("covers" in str(actual_result))
@@ -198,6 +194,7 @@ class JoinTests(QueryTests):
             self.assertTrue("(`b2`.`docid`)" in str(actual_result))
             self.query = 'SELECT meta(b1).id b1id from default b1 NEST default b2 ON KEY b2.docid FOR b1 WHERE meta(b1).id > ""'
             actual_result=self.run_cbq_query()
+            self.assertTrue(actual_result['results']==[{u'b1id': u'w001'}])
             self.query = 'explain SELECT meta(b1).id b1id, b2 from default b1 NEST default b2 ON KEY b2.docid FOR b1 WHERE meta(b1).id > ""'
             actual_result=self.run_cbq_query()
             self.assertTrue("covers" in str(actual_result))
@@ -760,8 +757,6 @@ class JoinTests(QueryTests):
             actual_result = self.run_cbq_query()
             actual_result = actual_result['results']
             self._delete_ids(actual_result)
-            print json.JSONEncoder().encode(actual_result)
-
             actual_result = self.sort_nested_list(actual_result, key='task_name')
             actual_result = sorted(actual_result, key=lambda doc:
                                    self._get_for_sort(doc))
@@ -1024,9 +1019,7 @@ class JoinTests(QueryTests):
         self.query = "select 1"
         actual_result = self.run_cbq_query()
         actual_result = sorted(actual_result)
-        print actual_result
         self.query = "select 1 from system:dual"
         expected_result = self.run_cbq_query()
         expected_result = sorted(expected_result)
-        print expected_result
         self._verify_results(actual_result, expected_result)

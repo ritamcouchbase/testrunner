@@ -1,21 +1,24 @@
-import Queue
+import sys
+import paramiko
+from basetestcase import BaseTestCase
 import json
 import os
-import random
-import threading
 import zipfile
-from itertools import combinations
-
-import paramiko
-
-from basetestcase import BaseTestCase
-from couchbase_helper.query_helper import QueryHelper
-from couchbase_helper.tuq_helper import N1QLHelper
-from lib.membase.helper.bucket_helper import BucketOperationHelper
-from membase.api.rest_client import RestConnection
+import pprint
+import Queue
+import json
+from membase.helper.cluster_helper import ClusterOperationHelper
+import mc_bin_client
+import threading
 from memcached.helper.data_helper import  VBucketAwareMemcached
 from mysql_client import MySQLClient
+from membase.api.rest_client import RestConnection, Bucket
+from couchbase_helper.tuq_helper import N1QLHelper
+from couchbase_helper.query_helper import QueryHelper
 from remote.remote_util import RemoteMachineShellConnection
+from lib.membase.helper.bucket_helper import BucketOperationHelper
+import random
+from itertools import combinations
 
 
 class RQGTests(BaseTestCase):
@@ -1155,7 +1158,7 @@ class RQGTests(BaseTestCase):
             self.sleep(10)
 
             # self.log.info("Increasing Indexer Memory Quota to {0}".format(self.indexer_memQuota))
-            # self.rest.set_indexer_memoryQuota(indexMemoryQuota=self.indexer_memQuota)
+            # self.rest.set_service_memoryQuota(service='indexMemoryQuota', memoryQuota=self.indexer_memQuota)
             # self.sleep(120)
         if self.change_bucket_properties:
             shell = RemoteMachineShellConnection(self.master)

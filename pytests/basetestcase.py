@@ -1,36 +1,42 @@
-import commands
+import logger
+import unittest
 import copy
 import datetime
-import json
-import logging
-import random
-import string
 import time
+import string
+import random
+import logging
+import json
+import commands
+import mc_bin_client
 import traceback
-import unittest
 
-import logger
-import testconstants
-from TestInput import TestInputSingleton
-from couchbase_cli import CouchbaseCLI
-from couchbase_helper.cluster import Cluster
-from couchbase_helper.data_analysis_helper import *
-from couchbase_helper.document import View
+
+from memcached.helper.data_helper import VBucketAwareMemcached
 from couchbase_helper.documentgenerator import BlobGenerator
+from couchbase_helper.cluster import Cluster
+from couchbase_helper.document import View
 from couchbase_helper.documentgenerator import DocumentGenerator
 from couchbase_helper.stats_tools import StatsCommon
-from membase.api.exception import ServerUnavailableException
-from membase.api.rest_client import Bucket, RestHelper
+from TestInput import TestInputSingleton
+from membase.api.rest_client import RestConnection, Bucket, RestHelper
 from membase.helper.bucket_helper import BucketOperationHelper
 from membase.helper.cluster_helper import ClusterOperationHelper
 from membase.helper.rebalance_helper import RebalanceHelper
-from memcached.helper.data_helper import VBucketAwareMemcached
-from remote.remote_util import RemoteUtilHelper
-from scripts.collect_server_info import cbcollectRunner
-from security.rbac_base import RbacBase
-from testconstants import MAX_COMPACTION_THRESHOLD
-from testconstants import MIN_COMPACTION_THRESHOLD
+from memcached.helper.data_helper import MemcachedClientHelper
+from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
+from membase.api.exception import ServerUnavailableException
+from couchbase_helper.data_analysis_helper import *
 from testconstants import STANDARD_BUCKET_PORT
+from testconstants import MIN_COMPACTION_THRESHOLD
+from testconstants import MAX_COMPACTION_THRESHOLD
+from membase.helper.cluster_helper import ClusterOperationHelper
+from security.rbac_base import RbacBase
+
+from couchbase_cli import CouchbaseCLI
+import testconstants
+
+from scripts.collect_server_info import cbcollectRunner
 
 
 class BaseTestCase(unittest.TestCase):
@@ -77,6 +83,18 @@ class BaseTestCase(unittest.TestCase):
         self.result_analyzer = DataAnalysisResultAnalyzer()
         self.set_testrunner_client()
         self.change_bucket_properties=False
+        self.cbas_node = self.input.cbas
+        self.cbas_servers = []
+        self.kv_servers = []
+        self.otpNodes = []
+        for server in self.servers:
+            if "cbas" in server.services:
+                self.cbas_servers.append(server)
+            if "kv" in server.services:
+                self.kv_servers.append(server)
+        if not self.cbas_node and len(self.cbas_servers)>=1:
+            self.cbas_node = self.cbas_servers[0]
+                            
         try:
             self.skip_setup_cleanup = self.input.param("skip_setup_cleanup", False)
             self.vbuckets = self.input.param("vbuckets", 1024)
@@ -93,7 +111,11 @@ class BaseTestCase(unittest.TestCase):
             self.parallelism = self.input.param("parallelism",False)
             if self.default_bucket:
                 self.default_bucket_name = "default"
+            self.skip_standard_buckets = self.input.param("skip_standard_buckets", False)
             self.standard_buckets = self.input.param("standard_buckets", 0)
+            if self.skip_standard_buckets:
+                self.standard_buckets = 0
+                BucketOperationHelper.delete_all_buckets_or_assert(servers=self.servers, test_case=self)
             self.sasl_buckets = self.input.param("sasl_buckets", 0)
             self.num_buckets = self.input.param("num_buckets", 0)
             self.verify_unacked_bytes = self.input.param("verify_unacked_bytes", False)
@@ -136,9 +158,6 @@ class BaseTestCase(unittest.TestCase):
             self.enable_bloom_filter = self.input.param("enable_bloom_filter", False)
             self.enable_time_sync = self.input.param("enable_time_sync", False)
             self.gsi_type = self.input.param("gsi_type", 'plasma')
-            if hasattr(self.input, 'cbas'):
-                if self.input.cbas:
-                    self.cbas_node = self.input.cbas
             # bucket parameters go here,
             self.bucket_size = self.input.param("bucket_size", None)
             self.bucket_type = self.input.param("bucket_type", 'membase')
@@ -201,11 +220,13 @@ class BaseTestCase(unittest.TestCase):
             memcached_params['bucket_type'] = 'memcached'
             self.bucket_base_params['memcached'] = memcached_params
 
-            # avoid any cluster operations in setup for new upgrade & upgradeXDCR tests
+            # avoid any cluster operations in setup for new upgrade
+            #  & upgradeXDCR tests
             if str(self.__class__).find('newupgradetests') != -1 or \
                             str(self.__class__).find('upgradeXDCR') != -1 or \
                             str(self.__class__).find('Upgrade_EpTests') != -1 or \
-                            hasattr(self, 'skip_buckets_handle') and self.skip_buckets_handle:
+                            hasattr(self, 'skip_buckets_handle') and\
+                            self.skip_buckets_handle:
                 self.log.info("any cluster operation in setup will be skipped")
                 self.primary_index_created = True
                 self.log.info("==============  basetestcase setup was finished for test #{0} {1} ==============" \
@@ -217,7 +238,8 @@ class BaseTestCase(unittest.TestCase):
                     self.log.warn("teardDown for previous test failed. will retry..")
                     self.case_number -= 1000
                 self.cleanup = True
-                self.tearDown()
+                if not self.skip_init_check_cbserver:
+                    self.tearDown()
                 self.cluster = Cluster()
             if not self.skip_init_check_cbserver:
                 self.log.info("initializing cluster")
@@ -242,7 +264,8 @@ class BaseTestCase(unittest.TestCase):
                 self.change_checkpoint_params()
 
                 # Add built-in user
-                self.add_built_in_server_user(node=self.master)
+                if not self.skip_init_check_cbserver:
+                    self.add_built_in_server_user(node=self.master)
                 self.log.info("done initializing cluster")
             else:
                 self.quota = ""
@@ -424,8 +447,7 @@ class BaseTestCase(unittest.TestCase):
             self._log_finish(self)
 
     def get_index_map(self):
-        rest = RestConnection(self.master)
-        return rest.get_index_status()
+        return RestConnection(self.master).get_index_status()
 
     @staticmethod
     def change_max_buckets(self, total_buckets):
@@ -2009,8 +2031,12 @@ class BaseTestCase(unittest.TestCase):
                cbadminbucket
            Default added user is cbadminbucket with admin role
         """
-        rest = RestConnection(self.master)
+        if node is None:
+            node = self.master
+        rest = RestConnection(node)
         versions = rest.get_nodes_versions()
+        if not versions:
+            return
         for version in versions:
             if "5" > version:
                 self.log.info("Atleast one of the nodes in the cluster is "
@@ -2023,8 +2049,6 @@ class BaseTestCase(unittest.TestCase):
         if rolelist is None:
             rolelist = [{'id': 'cbadminbucket', 'name': 'cbadminbucket',
                                                       'roles': 'admin'}]
-        if node is None:
-            node = self.master
 
         self.log.info("**** add built-in '%s' user to node %s ****" % (testuser[0]["name"],
                                                                        node.ip))
@@ -2172,13 +2196,12 @@ class BaseTestCase(unittest.TestCase):
         index_map = None
         for server in servers:
             key = "{0}:{1}".format(server.ip, server.port)
-            rest = RestConnection(server)
             if perNode:
                 if index_map == None:
                     index_map = {}
-                index_map[key] = rest.get_index_stats(index_map=None)
+                index_map[key] = RestConnection(server).get_index_stats(index_map=None)
             else:
-                index_map = rest.get_index_stats(index_map=index_map)
+                index_map = RestConnection(server).get_index_stats(index_map=index_map)
         return index_map
 
     def get_nodes_from_services_map(self, service_type="n1ql", get_all_nodes=False, servers=None, master=None):

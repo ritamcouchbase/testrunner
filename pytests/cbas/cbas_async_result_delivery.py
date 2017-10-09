@@ -1,7 +1,5 @@
-import datetime
-
 from cbas_base import *
-
+import datetime
 
 class CBASAsyncResultDeliveryTests(CBASBaseTest):
     def setUp(self):
@@ -18,7 +16,7 @@ class CBASAsyncResultDeliveryTests(CBASBaseTest):
         super(CBASAsyncResultDeliveryTests, self).tearDown()
 
     def setupForTest(self):
-        self.load_sample_buckets(server=self.master, bucketName="travel-sample", total_items=self.travel_sample_docs_count)
+        self.load_sample_buckets(servers=[self.master], bucketName="travel-sample", total_items=self.travel_sample_docs_count)
 
         # Create bucket on CBAS
         self.create_bucket_on_cbas(cbas_bucket_name=self.cbas_bucket_name,

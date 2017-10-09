@@ -2,16 +2,15 @@
 
 # TODO: add installer support for membasez
 
-import Queue
-import copy
 import getopt
+import copy, re
 import logging
 import os
-import re
-import socket
 import sys
-from datetime import datetime
 from threading import Thread
+from datetime import datetime
+import socket
+import Queue
 
 sys.path = [".", "lib"] + sys.path
 import testconstants
@@ -23,12 +22,15 @@ from membase.api.rest_client import RestConnection, RestHelper
 from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
 from membase.helper.cluster_helper import ClusterOperationHelper
 from testconstants import MV_LATESTBUILD_REPO
+from testconstants import SHERLOCK_BUILD_REPO
+from testconstants import COUCHBASE_REPO
 from testconstants import CB_REPO
 from testconstants import COUCHBASE_VERSION_2
-from testconstants import COUCHBASE_VERSION_3, COUCHBASE_FROM_SPOCK
+from testconstants import COUCHBASE_VERSION_3, COUCHBASE_FROM_WATSON,\
+                          COUCHBASE_FROM_SPOCK
 from testconstants import CB_VERSION_NAME, COUCHBASE_FROM_VERSION_4,\
                           CB_RELEASE_BUILDS, COUCHBASE_VERSIONS
-from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA
+from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA, CBAS_QUOTA
 from testconstants import LINUX_COUCHBASE_PORT_CONFIG_PATH, LINUX_COUCHBASE_OLD_CONFIG_PATH
 from testconstants import WIN_COUCHBASE_PORT_CONFIG_PATH, WIN_COUCHBASE_OLD_CONFIG_PATH
 import TestInput
@@ -58,6 +60,7 @@ Available keys:
  xdcr_upr=                  Enable UPR for XDCR (temporary param until XDCR with UPR is stable), values: None | True | False
  fts_query_limit=1000000    Set a limit for the max results to be returned by fts for any query
  change_indexer_ports=false Sets indexer ports values to non-default ports
+ storage_mode=plasma        Sets indexer storage mode
 
 
 Examples:
@@ -94,7 +97,7 @@ def installer_factory(params):
         sys.exit("ERROR: don't know what product you want installed")
 
     mb_alias = ["membase", "membase-server", "mbs", "mb"]
-    cb_alias = ["couchbase", "couchbase-server", "cb"]
+    cb_alias = ["couchbase", "couchbase-server", "cb", "cbas"]
     sdk_alias = ["python-sdk", "pysdk"]
     es_alias = ["elasticsearch"]
     css_alias = ["couchbase-single", "couchbase-single-server", "css"]
@@ -130,7 +133,7 @@ class Installer(object):
         #remote_client.membase_uninstall()
 
         self.msi = 'msi' in params and params['msi'].lower() == 'true'
-        remote_client.couchbase_uninstall(windows_msi=self.msi)
+        remote_client.couchbase_uninstall(windows_msi=self.msi,product=params['product'])
         remote_client.disconnect()
 
 
@@ -202,8 +205,11 @@ class Installer(object):
             cb_alias = ["couchbase", "couchbase-server", "cb"]
             css_alias = ["couchbase-single", "couchbase-single-server", "css"]
             moxi_alias = ["moxi", "moxi-server"]
+            cbas_alias = ["cbas", "server-analytics"]
 
-            if params["product"] in mb_alias:
+            if params["product"] in cbas_alias:
+                names = ['couchbase-server-analytics', 'server-analytics']
+            elif params["product"] in mb_alias:
                 names = ['membase-server-enterprise', 'membase-server-community']
             elif params["product"] in cb_alias:
                 if "type" in params and params["type"].lower() in "couchbase-server-community":
@@ -227,12 +233,33 @@ class Installer(object):
 
         remote_client = RemoteMachineShellConnection(server)
         info = remote_client.extract_remote_info()
+        print "\n*** OS version of this server %s is %s ***" % (remote_client.ip,
+                                                       info.distribution_version)
+        if info.distribution_version.lower() == "suse 12":
+            if version[:5] not in COUCHBASE_FROM_SPOCK:
+                mesg = "%s does not support cb version %s \n" % \
+                         (info.distribution_version, version[:5])
+                remote_client.stop_current_python_running(mesg)
         if info.type.lower() == "windows":
             if "-" in version:
                 msi_build = version.split("-")
-                if msi_build[0] in COUCHBASE_FROM_SPOCK and \
-                     int(msi_build[1]) >= 2924:
+                """
+                    In spock from build 2924 and later release, we only support
+                    msi installation method on windows
+                """
+                if "2k8" in info.windows_name:
+                    info.windows_name = 2008
+
+                if msi_build[0] in COUCHBASE_FROM_SPOCK:
                     info.deliverable_type = "msi"
+                elif "5" > msi_build[0] and info.windows_name == 2016:
+                    log.info("\n========\n"
+                        "         Build version %s does not support on\n"
+                        "         Windows Server 2016\n"
+                        "========"  % msi_build[0])
+                    os.system("ps aux | grep python | grep %d " % os.getpid())
+                    time.sleep(5)
+                    os.system('kill %d' % os.getpid())
             else:
                 print "Incorrect version format"
                 sys.exit()
@@ -249,6 +276,8 @@ class Installer(object):
             build_repo = MV_LATESTBUILD_REPO
             if toy is not "":
                 build_repo = CB_REPO
+            elif "server-analytics" in names:
+                build_repo = CB_REPO.replace("couchbase-server", "server-analytics") + CB_VERSION_NAME[version[:3]] + "/"
             elif "moxi-server" in names and version[:5] != "2.5.2":
                 print "version   ", version
                 """
@@ -421,7 +450,7 @@ class MembaseServerInstaller(Installer):
             ready = RestHelper(RestConnection(params["server"])).is_ns_server_running(60)
             if not ready:
                 log.error("membase-server did not start...")
-            log.info('wait 5 seconds for membase server to start')
+            log.info('wait 5 seconds for Membase server to start')
             time.sleep(5)
         remote_client.disconnect()
         if queue:
@@ -478,43 +507,29 @@ class CouchbaseServerInstaller(Installer):
                         kv_quota = int(rest.get_nodes_self().mcdMemoryReserved)
                     info = rest.get_nodes_self()
                     cb_version = info.version[:5]
-
-                    if cb_version in COUCHBASE_FROM_VERSION_4:
-                        if "index" in set_services and "fts" not in set_services:
-                            log.info("quota for index service will be %s MB" \
-                                                              % (INDEX_QUOTA))
-                            kv_quota = int(info.mcdMemoryReserved * 2/3) - INDEX_QUOTA
-                            log.info("set index quota to node %s " % server.ip)
-                            rest.set_indexer_memoryQuota(indexMemoryQuota=INDEX_QUOTA)
-                            if kv_quota < MIN_KV_QUOTA:
-                                raise Exception("KV RAM needs to be more than %s MB"
-                                        " at node  %s"  % (MIN_KV_QUOTA, server.ip))
-                        elif "index" in set_services and "fts" in set_services:
-                            log.info("quota for index service will be %s MB" \
-                                                              % (INDEX_QUOTA))
-                            log.info("quota for fts service will be %s MB" \
-                                                                % (FTS_QUOTA))
-                            kv_quota = int(info.mcdMemoryReserved * 2/3)\
-                                                                 - INDEX_QUOTA \
-                                                                 - FTS_QUOTA
-                            log.info("set both index and fts quota at node %s "\
-                                                                    % server.ip)
-                            rest.set_indexer_memoryQuota(indexMemoryQuota=INDEX_QUOTA)
-                            rest.set_fts_memoryQuota(ftsMemoryQuota=FTS_QUOTA)
-                            if kv_quota < MIN_KV_QUOTA:
-                                raise Exception("KV RAM need to be more than %s MB"
-                                       " at node  %s"  % (MIN_KV_QUOTA, server.ip))
-                        elif "fts" in set_services and "index" not in set_services:
-                            log.info("quota for fts service will be %s MB" \
-                                                                % (FTS_QUOTA))
-                            kv_quota = int(info.mcdMemoryReserved * 2/3) - FTS_QUOTA
-                            if kv_quota < MIN_KV_QUOTA:
-                                raise Exception("KV RAM need to be more than %s MB"
-                                       " at node  %s"  % (MIN_KV_QUOTA, server.ip))
-                            """ for fts, we need to grep quota from ns_server
+                    kv_quota = int(info.mcdMemoryReserved * 2/3)
+                    """ for fts, we need to grep quota from ns_server
                                 but need to make it works even RAM of vm is
                                 smaller than 2 GB """
-                            rest.set_fts_memoryQuota(ftsMemoryQuota=FTS_QUOTA)
+
+                    if cb_version in COUCHBASE_FROM_VERSION_4:
+                        if "index" in set_services:
+                            log.info("quota for index service will be %s MB" % (INDEX_QUOTA))
+                            kv_quota -= INDEX_QUOTA
+                            log.info("set index quota to node %s " % server.ip)
+                            rest.set_service_memoryQuota(service='indexMemoryQuota', memoryQuota=INDEX_QUOTA)
+                        if "fts" in set_services:
+                            log.info("quota for fts service will be %s MB" % (FTS_QUOTA))
+                            kv_quota -= FTS_QUOTA
+                            log.info("set both index and fts quota at node %s "% server.ip)
+                            rest.set_service_memoryQuota(service='ftsMemoryQuota', memoryQuota=FTS_QUOTA)
+                        if "cbas" in set_services:
+                            log.info("quota for cbas service will be %s MB" % (CBAS_QUOTA))
+                            kv_quota -= CBAS_QUOTA
+                            rest.set_service_memoryQuota(service = "cbasMemoryQuota", memoryQuota=CBAS_QUOTA)
+                        if kv_quota < MIN_KV_QUOTA:
+                                raise Exception("KV RAM needs to be more than %s MB"
+                                        " at node  %s"  % (MIN_KV_QUOTA, server.ip))
                     """ set kv quota smaller than 1 MB so that it will satify
                         the condition smaller than allow quota """
                     kv_quota -= 1
@@ -527,7 +542,11 @@ class CouchbaseServerInstaller(Installer):
                                                 password=server.rest_password,
                                                         services=set_services)
                     if "index" in set_services:
-                        rest.set_indexer_storage_mode()
+                        if "storage_mode" in params:
+                            storageMode = params["storage_mode"]
+                        else:
+                            storageMode = "plasma"
+                        rest.set_indexer_storage_mode(storageMode=storageMode)
                     rest.init_cluster(username=server.rest_username,
                                          password=server.rest_password)
 
@@ -545,6 +564,9 @@ class CouchbaseServerInstaller(Installer):
                 """ set cbauth environment variables from Watson version
                     it is checked version inside method """
                 remote_client.set_cbauth_env(server)
+                remote_client.check_man_page()
+                """ add unzip command on server if it is not available """
+                remote_client.check_cmd("unzip")
                 remote_client.disconnect()
                 # TODO: Make it work with windows
                 if "erlang_threads" in params:
@@ -638,9 +660,12 @@ class CouchbaseServerInstaller(Installer):
         if not linux_repo:
             if type == "windows":
                 log.info('***** Download Windows binary*****')
+                """
+                    In spock from build 2924 and later release, we only support
+                    msi installation method on windows
+                """
                 if "-" in params["version"] and \
-                    params["version"].split("-")[0] in COUCHBASE_FROM_SPOCK and \
-                    int(params["version"].split("-")[1]) >= 2924:
+                    params["version"].split("-")[0] in COUCHBASE_FROM_SPOCK:
                     self.msi = True
                     os_type = "msi"
                 remote_client.download_binary_in_win(build.url, params["version"],
@@ -663,7 +688,7 @@ class CouchbaseServerInstaller(Installer):
                                          vbuckets=vbuckets, swappiness=swappiness,\
                                         openssl=openssl, upr=upr, xdcr_upr=xdcr_upr,
                                         fts_query_limit=fts_query_limit)
-                    log.info('wait 5 seconds for membase server to start')
+                    log.info('wait 5 seconds for Couchbase server to start')
                     time.sleep(5)
                     if "rest_vbuckets" in params:
                         rest_vbuckets = int(params["rest_vbuckets"])
@@ -682,7 +707,7 @@ class CouchbaseServerInstaller(Installer):
             try:
                 success = remote_client.install_server_via_repo(info.deliverable_type,\
                                                              cb_edition, remote_client)
-                log.info('wait 5 seconds for membase server to start')
+                log.info('wait 5 seconds for Couchbase server to start')
                 time.sleep(5)
             except BaseException, e:
                 success = False

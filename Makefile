@@ -47,10 +47,13 @@ test-viewmerge:
 # required before merging 2i code
 test-2i-integrations-tests:
 	echo "Running 2i integration tests with 4 node cluster"
-	scripts/start_cluster_and_run_tests.sh b/resources/dev-4-nodes-xdcr_n1ql_2i.ini conf/simple_2i_n1ql.conf
+	scripts/start_cluster_and_run_tests.sh b/resources/dev-4-nodes-xdcr_n1ql_2i.ini conf/simple_2i_n1ql.conf 1 1 $(PARAMS)
 
 e2e-kv-single-node:
 	scripts/start_cluster_and_run_tests.sh b/resources/dev.ini conf/py-all-dev.conf
+
+test-functions-sanity-tests:
+	scripts/start_cluster_and_run_tests.sh b/resources/dev-single-node.ini conf/functions/functions_sanity.conf
 
 test-xdcr-merge:
 	scripts/start_cluster_and_run_tests.sh b/resources/dev-4-nodes-xdcr.ini conf/py-xdcrmerge.conf

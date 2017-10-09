@@ -1,12 +1,12 @@
 import json
-import random
-from threading import Thread
 
 from base_2i import BaseSecondaryIndexingTests
+from membase.api.rest_client import RestConnection, RestHelper
+import random
 from lib import testconstants
 from lib.memcached.helper.data_helper import MemcachedClientHelper
 from lib.remote.remote_util import RemoteMachineShellConnection
-from membase.api.rest_client import RestConnection, RestHelper
+from threading import Thread
 from pytests.query_tests_helper import QueryHelperTests
 
 
@@ -600,7 +600,7 @@ class GSIReplicaIndexesTests(BaseSecondaryIndexingTests, QueryHelperTests):
         reached = RestHelper(self.rest).rebalance_reached()
         self.assertTrue(reached, "rebalance failed, stuck or did not complete")
         rebalance.result()
-        self.sleep(30)
+        self.sleep(180)
 
         index_map = self.get_index_map()
         self.n1ql_helper.verify_replica_indexes_build_status(index_map,
@@ -656,8 +656,16 @@ class GSIReplicaIndexesTests(BaseSecondaryIndexingTests, QueryHelperTests):
                 self.log.info("Index building failed as expected")
 
         finally:
+            # Heal network partition and wait for some time to allow indexes
+            # to get built automatically on that node
             self.stop_firewall_on_node(node_out)
-            self.sleep(10)
+            self.sleep(360)
+
+            index_map = self.get_index_map()
+            self.n1ql_helper.verify_replica_indexes_build_status(index_map,
+                                                                 len(nodes) - 1,
+                                                                 defer_build=False)
+
 
     def test_build_index_while_another_index_building(self):
         index_name_age = "age_index_" + str(
@@ -711,7 +719,7 @@ class GSIReplicaIndexesTests(BaseSecondaryIndexingTests, QueryHelperTests):
         for thread in threads:
             thread.join()
 
-        self.sleep(120)
+        self.sleep(240)
 
         try:
             index_map = self.get_index_map()
@@ -985,8 +993,15 @@ class GSIReplicaIndexesTests(BaseSecondaryIndexingTests, QueryHelperTests):
                 self.log.info("Drop index failed as expected")
 
         finally:
+            # Heal network partition and wait for some time to allow indexes
+            # on the node to get dropped automatically
             self.stop_firewall_on_node(node_out)
-            self.sleep(10)
+            self.sleep(180)
+
+            index_map = self.get_index_map()
+            self.log.info("Index map after drop index: %s", index_map)
+            if not index_map == {}:
+                self.fail("Indexes not dropped correctly")
 
     def test_replica_movement_with_rebalance_out(self):
         nodes = self._get_node_list()
@@ -1052,6 +1067,100 @@ class GSIReplicaIndexesTests(BaseSecondaryIndexingTests, QueryHelperTests):
         try:
             self.n1ql_helper.run_cbq_query(query=create_index_query,
                                            server=self.n1ql_node)
+        except Exception, ex:
+            self.log.info(str(ex))
+            self.fail("Index creation Failed : %s", str(ex))
+
+        self.sleep(30)
+        index_map_before_rebalance = self.get_index_map()
+        stats_map_before_rebalance = self.get_index_stats(perNode=False)
+
+        self.log.info(index_map_before_rebalance)
+        if not self.expected_err_msg:
+            self.n1ql_helper.verify_replica_indexes([index_name_prefix],
+                                                    index_map_before_rebalance,
+                                                    len(nodes) - 1, nodes)
+
+        node_out = self.servers[self.node_out]
+        rebalance = self.cluster.async_rebalance(self.servers[:self.nodes_init],
+                                                 [], [node_out])
+        reached = RestHelper(self.rest).rebalance_reached()
+        self.assertTrue(reached, "rebalance failed, stuck or did not complete")
+        rebalance.result()
+        self.sleep(30)
+
+        index_map_after_rebalance1 = self.get_index_map()
+        stats_map_after_rebalance1 = self.get_index_stats(perNode=False)
+
+        try:
+            self.n1ql_helper.verify_indexes_redistributed(
+                index_map_before_rebalance,
+                index_map_after_rebalance1,
+                stats_map_before_rebalance,
+                stats_map_after_rebalance1,
+                [],
+                [node_out])
+        except Exception, ex:
+            self.log.info(str(ex))
+            if "some indexes are missing after rebalance" not in str(ex):
+                self.fail(
+                    "Error in index distribution post rebalance : ".format(
+                        str(ex)))
+            else:
+                self.log.info(str(ex))
+
+        node_in = self.servers[self.node_out]
+        rebalance = self.cluster.async_rebalance(self.servers[:self.nodes_init],
+                                                 [node_in], [],
+                                                 services=["index"])
+        reached = RestHelper(self.rest).rebalance_reached()
+        self.assertTrue(reached, "rebalance failed, stuck or did not complete")
+        rebalance.result()
+        self.sleep(30)
+
+        index_map_after_rebalance2 = self.get_index_map()
+        stats_map_after_rebalance2 = self.get_index_stats(perNode=False)
+
+        try:
+            self.n1ql_helper.verify_indexes_redistributed(
+                index_map_before_rebalance,
+                index_map_after_rebalance2,
+                stats_map_before_rebalance,
+                stats_map_after_rebalance2,
+                [node_in],
+                [])
+        except Exception, ex:
+            self.log.info(str(ex))
+            if self.expected_err_msg not in str(ex):
+                self.fail(
+                    "Error in index distribution post rebalance : ".format(
+                        str(ex)))
+            else:
+                self.log.info(str(ex))
+
+    # This test is for MB-25609 : Fix wait for index build in rebalancer for replica repair
+    def test_rebalance_in_out_same_node_with_deferred_and_non_deferred_indexes(self):
+        nodes = self._get_node_list()
+        self.log.info(nodes)
+        index_name_prefix = "random_index_" + str(
+            random.randint(100000, 999999))
+        create_non_deferred_index_query = "CREATE INDEX " + index_name_prefix + " ON default(age) USING GSI  WITH {{'nodes': {0}}};".format(
+            nodes)
+        self.log.info(create_non_deferred_index_query)
+        try:
+            self.n1ql_helper.run_cbq_query(query=create_non_deferred_index_query,
+                                           server=self.n1ql_node)
+        except Exception, ex:
+            self.log.info(str(ex))
+            self.fail("Index creation Failed : %s", str(ex))
+
+        create_deferred_index_query = "CREATE INDEX " + index_name_prefix + "_deferred ON default(age) USING GSI  WITH {{'nodes': {0},'defer_build':true}};".format(
+            nodes)
+        self.log.info(create_deferred_index_query)
+        try:
+            self.n1ql_helper.run_cbq_query(
+                query=create_deferred_index_query,
+                server=self.n1ql_node)
         except Exception, ex:
             self.log.info(str(ex))
             self.fail("Index creation Failed : %s", str(ex))
@@ -2519,6 +2628,448 @@ class GSIReplicaIndexesTests(BaseSecondaryIndexingTests, QueryHelperTests):
                 self._validate_cbindexplan_result(json, "plan",
                                                   expected_node_list)
 
+
+    def test_failover_with_replica_with_concurrent_querying_using_use_index(self):
+        self.run_operation(phase="before")
+        index_server = self.get_nodes_from_services_map(service_type="index", get_all_nodes=False)
+        index_name_prefix = "random_index_" + str(random.randint(100000, 999999))
+        create_index_query = "CREATE INDEX " + index_name_prefix + \
+                             " ON default(age) USING GSI  WITH {{'num_replica': {0}}};".format(self.num_index_replicas)
+        try:
+            self.n1ql_helper.run_cbq_query(query=create_index_query,
+                                           server=self.n1ql_node)
+        except Exception, ex:
+            self.log.info(str(ex))
+            if self.expected_err_msg not in str(ex):
+                self.fail(
+                    "index creation did not fail with expected error : {0}".format(
+                        str(ex)))
+            else:
+                self.log.info("Index creation failed as expected")
+        self.sleep(30)
+        index_map = self.get_index_map()
+        self.log.info(index_map)
+        if not self.expected_err_msg:
+            self.n1ql_helper.verify_replica_indexes([index_name_prefix],
+                                                    index_map,
+                                                    self.num_index_replicas)
+        map_before_rebalance, stats_map_before_rebalance = self._return_maps()
+        # start querying using USE index
+        t1 = Thread(target=self._run_use_index,
+                    args=(index_name_prefix, 500))
+        t1.start()
+        failover_task = self.cluster.async_failover(
+            self.servers[:self.nodes_init], [index_server], self.graceful,
+            wait_for_pending=180)
+        failover_task.result()
+        rebalance = self.cluster.async_rebalance(self.servers[:self.nodes_init],
+                                                 [], [index_server])
+        reached = RestHelper(self.rest).rebalance_reached()
+        self.assertTrue(reached, "rebalance failed, stuck or did not complete")
+        rebalance.result()
+        t1.join()
+        map_after_rebalance, stats_map_after_rebalance = self._return_maps()
+        # validate the results
+        try:
+            self.n1ql_helper.verify_indexes_redistributed(
+                map_before_rebalance,
+                map_after_rebalance,
+                stats_map_before_rebalance,
+                stats_map_after_rebalance,
+                [],
+                [index_server])
+        except Exception, ex:
+            self.log.info(str(ex))
+            if "some indexes are missing after rebalance" not in str(ex):
+                self.fail(
+                    "Error in index distribution post rebalance : ".format(
+                        str(ex)))
+            else:
+                self.log.info(str(ex))
+        self.run_operation(phase="after")
+
+    def test_failover_with_replica_with_concurrent_querying_using_prepare_statement(self):
+        self.run_operation(phase="before")
+        index_server = self.get_nodes_from_services_map(service_type="index", get_all_nodes=False)
+        index_name_prefix = "random_index_" + str(random.randint(100000, 999999))
+        create_index_query = "CREATE INDEX " + index_name_prefix + \
+                             " ON default(age) USING GSI  WITH {{'num_replica': {0}}};".format(self.num_index_replicas)
+        try:
+            self.n1ql_helper.run_cbq_query(query=create_index_query,
+                                           server=self.n1ql_node)
+        except Exception, ex:
+            self.log.info(str(ex))
+            if self.expected_err_msg not in str(ex):
+                self.fail(
+                    "index creation did not fail with expected error : {0}".format(
+                        str(ex)))
+            else:
+                self.log.info("Index creation failed as expected")
+        prepared_statement = "PREPARE prep_stmt AS SELECT count(age) from default USE INDEX ({0} USING GSI) where age > " \
+                             "10".format(index_name_prefix)
+        self.n1ql_helper.run_cbq_query(query=prepared_statement,
+                                       server=self.n1ql_node)
+        self.sleep(30)
+        index_map = self.get_index_map()
+        self.log.info(index_map)
+        if not self.expected_err_msg:
+            self.n1ql_helper.verify_replica_indexes([index_name_prefix],
+                                                    index_map,
+                                                    self.num_index_replicas)
+        map_before_rebalance, stats_map_before_rebalance = self._return_maps()
+        # start querying using prepared statement
+        t1 = Thread(target=self._run_prepare_statement,
+                    args=("prep_stmt", 500))
+        t1.start()
+        failover_task = self.cluster.async_failover(
+            self.servers[:self.nodes_init], [index_server], self.graceful,
+            wait_for_pending=180)
+        failover_task.result()
+        rebalance = self.cluster.async_rebalance(self.servers[:self.nodes_init],
+                                                 [], [index_server])
+        reached = RestHelper(self.rest).rebalance_reached()
+        self.assertTrue(reached, "rebalance failed, stuck or did not complete")
+        rebalance.result()
+        t1.join()
+        map_after_rebalance, stats_map_after_rebalance = self._return_maps()
+        # validate the results
+        try:
+            self.n1ql_helper.verify_indexes_redistributed(
+                map_before_rebalance,
+                map_after_rebalance,
+                stats_map_before_rebalance,
+                stats_map_after_rebalance,
+                [],
+                [index_server])
+        except Exception, ex:
+            self.log.info(str(ex))
+            if "some indexes are missing after rebalance" not in str(ex):
+                self.fail(
+                    "Error in index distribution post rebalance : ".format(
+                        str(ex)))
+            else:
+                self.log.info(str(ex))
+        self.run_operation(phase="after")
+
+    def test_prepare_statement_on_failedover_equivalent_index_with_replicas(self):
+        self.run_operation(phase="before")
+        eq_index_node = self.servers[int(self.eq_index_node)].ip + ":" + \
+                        self.servers[int(self.eq_index_node)].port
+
+        # Create Equivalent Index
+        equivalent_index_query = "CREATE INDEX eq_index ON default(age) USING GSI  WITH {{'nodes': '{0}'}};".format(
+            eq_index_node)
+        self.log.info(equivalent_index_query)
+        try:
+            self.n1ql_helper.run_cbq_query(query=equivalent_index_query,
+                                           server=self.n1ql_node)
+        except Exception, ex:
+            self.log.info(str(ex))
+            self.fail("Index creation Failed : %s", str(ex))
+
+        # Create prepare statement on Equivalent Index
+        prepared_statement = "PREPARE prep_stmt AS SELECT count(age) from default USE INDEX (eq_index USING GSI) where age > " \
+                             "10"
+        self.n1ql_helper.run_cbq_query(query=prepared_statement,
+                                       server=self.n1ql_node)
+        self.sleep(30)
+
+        # Create replicas
+        index_name_prefix = "random_index_" + str(random.randint(100000, 999999))
+        create_index_query = "CREATE INDEX " + index_name_prefix + \
+                             " ON default(age) USING GSI  WITH {{'num_replica': {0}}};".format(self.num_index_replicas)
+        try:
+            self.n1ql_helper.run_cbq_query(query=create_index_query,
+                                           server=self.n1ql_node)
+        except Exception, ex:
+            self.log.info(str(ex))
+            if self.expected_err_msg not in str(ex):
+                self.fail(
+                    "index creation did not fail with expected error : {0}".format(
+                        str(ex)))
+            else:
+                self.log.info("Index creation failed as expected")
+        self.sleep(30)
+        index_map = self.get_index_map()
+        self.log.info(index_map)
+        if not self.expected_err_msg:
+            self.n1ql_helper.verify_replica_indexes([index_name_prefix],
+                                                    index_map,
+                                                    self.num_index_replicas)
+        map_before_rebalance, stats_map_before_rebalance = self._return_maps()
+        # start querying using prepared statement
+        t1 = Thread(target=self._run_prepare_statement,
+                    args=("prep_stmt", 500))
+        t1.start()
+        failover_task = self.cluster.async_failover(
+            self.servers[:self.nodes_init], [self.servers[int(self.eq_index_node)]], self.graceful,
+            wait_for_pending=180)
+        failover_task.result()
+        rebalance = self.cluster.async_rebalance(self.servers[:self.nodes_init],
+                                                 [], [self.servers[int(self.eq_index_node)]])
+        reached = RestHelper(self.rest).rebalance_reached()
+        self.assertTrue(reached, "rebalance failed, stuck or did not complete")
+        rebalance.result()
+        t1.join()
+        map_after_rebalance, stats_map_after_rebalance = self._return_maps()
+        # validate the results
+        try:
+            self.n1ql_helper.verify_indexes_redistributed(
+                map_before_rebalance,
+                map_after_rebalance,
+                stats_map_before_rebalance,
+                stats_map_after_rebalance,
+                [],
+                [self.servers[int(self.eq_index_node)]])
+        except Exception, ex:
+            self.log.info(str(ex))
+            if "some indexes are missing after rebalance" not in str(ex):
+                self.fail(
+                    "Error in index distribution post rebalance : ".format(
+                        str(ex)))
+            else:
+                self.log.info(str(ex))
+        self.run_operation(phase="after")
+
+    def test_create_replica_index_with_num_replica_using_cbindex_create(self):
+        index_server = self.get_nodes_from_services_map(service_type="index", get_all_nodes=False)
+        index_name_prefix = "random_index_" + str(
+            random.randint(100000, 999999))
+        self._cbindex_create(index_server, index_name_prefix, "name", num_replica=2)
+        self.sleep(30)
+        index_map = self.get_index_map()
+        self.log.info(index_map)
+        if not self.expected_err_msg:
+            self.n1ql_helper.verify_replica_indexes([index_name_prefix],
+                                                    index_map,
+                                                    2)
+
+    def test_load_balancing_amongst_replicas_drop_replica_and_add_back(self):
+        node_out = self.servers[self.node_out]
+        hash = {}
+        index_name_prefix = "random_index_" + str(
+            random.randint(100000, 999999))
+        create_index_query = "CREATE INDEX " + index_name_prefix + " ON default(age) USING GSI  WITH {{'num_replica': {0}}};".format(
+            self.num_index_replicas)
+        select_query = "SELECT count(age) from default"
+        try:
+            self.n1ql_helper.run_cbq_query(query=create_index_query,
+                                           server=self.n1ql_node)
+        except Exception, ex:
+            self.log.info(str(ex))
+            if self.expected_err_msg not in str(ex):
+                self.fail(
+                    "index creation did not fail with expected error : {0}".format(
+                        str(ex)))
+            else:
+                self.log.info("Index creation failed as expected")
+        self.sleep(30)
+        index_map = self.get_index_map()
+        self.log.info(index_map)
+        if not self.expected_err_msg:
+            self.n1ql_helper.verify_replica_indexes([index_name_prefix],
+                                                    index_map,
+                                                    self.num_index_replicas)
+
+        # Run select query 100 times
+        for i in range(0, 100):
+            self.n1ql_helper.run_cbq_query(query=select_query,
+                                           server=self.n1ql_node)
+
+        index_stats = self.get_index_stats(perNode=True)
+
+        load_balanced = True
+        for i in range(0, self.num_index_replicas + 1):
+            if i == 0:
+                index_name = index_name_prefix
+            else:
+                index_name = index_name_prefix + " (replica {0})".format(str(i))
+
+            hostname, _ = self.n1ql_helper.get_index_details_using_index_name(
+                index_name, index_map)
+            num_request_served = index_stats[hostname]['default'][index_name][
+                "num_completed_requests"]
+            self.log.info("# Requests served by %s = %s" % (
+                index_name, num_request_served))
+            hash["index_name"] = num_request_served
+            if num_request_served == 0:
+                load_balanced = False
+
+        if not load_balanced:
+            self.fail("Load is not balanced amongst index replicas")
+
+        rebalance = self.cluster.async_rebalance(self.servers[:self.nodes_init],
+                                                 [], [node_out])
+        reached = RestHelper(self.rest).rebalance_reached()
+        self.assertTrue(reached, "rebalance failed, stuck or did not complete")
+        rebalance.result()
+
+        # Run select query 100 times
+        for i in range(0, 100):
+            self.n1ql_helper.run_cbq_query(query=select_query,
+                                           server=self.n1ql_node)
+
+        index_stats = self.get_index_stats(perNode=True)
+        index_map = self.get_index_map()
+
+        load_balanced = True
+        count = 0
+        for i in range(0, self.num_index_replicas + 1):
+            try:
+                if i == 0:
+                    index_name = index_name_prefix
+                else:
+                    index_name = index_name_prefix + " (replica {0})".format(str(i))
+                hostname, _ = self.n1ql_helper.get_index_details_using_index_name(
+                    index_name, index_map)
+                num_request_served = index_stats[hostname]['default'][index_name][
+                    "num_completed_requests"]
+                self.log.info("# Requests served by %s = %s" % (
+                    index_name, num_request_served))
+                if num_request_served > hash["index_name"]:
+                    count+=1
+                hash["index_name"] = num_request_served
+                if num_request_served == 0:
+                    load_balanced = False
+            except Exception as e:
+                self.log.info("snapshot doesn't exist")
+        if not load_balanced and count != 2:
+            self.fail("Load is not balanced amongst index replicas")
+
+        self.sleep(30)
+        self.servers[:self.nodes_init].pop(self.node_out)
+        rebalance = self.cluster.async_rebalance(self.servers[:self.nodes_init], [node_out], [], services=["index"])
+        reached = RestHelper(self.rest).rebalance_reached()
+        self.assertTrue(reached, "rebalance failed, stuck or did not complete")
+        rebalance.result()
+        self.sleep(100)
+        # Run select query 100 times
+        for i in range(0, 100):
+            self.n1ql_helper.run_cbq_query(query=select_query,
+                                           server=self.n1ql_node)
+
+        index_stats = self.get_index_stats(perNode=True)
+        index_map = self.get_index_map()
+
+        load_balanced = True
+        count = 0
+        for i in range(0, self.num_index_replicas + 1):
+            if i == 0:
+                index_name = index_name_prefix
+            else:
+                index_name = index_name_prefix + " (replica {0})".format(str(i))
+
+            hostname, _ = self.n1ql_helper.get_index_details_using_index_name(
+                index_name, index_map)
+            num_request_served = index_stats[hostname]['default'][index_name][
+                "num_completed_requests"]
+            self.log.info("# Requests served by %s = %s" % (
+                index_name, num_request_served))
+            if num_request_served > hash["index_name"]:
+                count += 1
+            hash["index_name"] = num_request_served
+            if num_request_served == 0:
+                load_balanced = False
+
+        if not load_balanced and count != 3:
+            self.fail("Load is not balanced amongst index replicas")
+
+    # Testcase for MB-23778
+    def test_load_balancing_with_replica_with_concurrent_querying_and_failover(
+            self):
+        hash_before = {}
+        index_name_prefix = "random_index_" + str(
+            random.randint(100000, 999999))
+        create_index_query = "CREATE INDEX " + index_name_prefix + " ON default(age) USING GSI  WITH {{'num_replica': {0}}};".format(
+            self.num_index_replicas)
+        select_query = "SELECT count(age) from default"
+        try:
+            self.n1ql_helper.run_cbq_query(query=create_index_query,
+                                           server=self.n1ql_node)
+        except Exception, ex:
+            self.log.info(str(ex))
+            if self.expected_err_msg not in str(ex):
+                self.fail(
+                    "index creation did not fail with expected error : {0}".format(
+                        str(ex)))
+            else:
+                self.log.info("Index creation failed as expected")
+        self.sleep(30)
+        index_map = self.get_index_map()
+        self.log.info(index_map)
+        if not self.expected_err_msg:
+            self.n1ql_helper.verify_replica_indexes([index_name_prefix],
+                                                    index_map,
+                                                    self.num_index_replicas)
+
+        # start querying
+        t1 = Thread(target=self._run_use_index,
+                    args=(index_name_prefix, 100))
+        t1.start()
+        self.sleep(5)
+
+        # Get num_requests_completed per index before failover
+        self.log.info("======BEFORE=====")
+        index_stats = self.get_index_stats(perNode=True)
+        for i in range(0, self.num_index_replicas + 1):
+            if i == 0:
+                index_name = index_name_prefix
+            else:
+                index_name = index_name_prefix + " (replica {0})".format(
+                    str(i))
+
+            hostname, _ = self.n1ql_helper.get_index_details_using_index_name(
+                index_name, index_map)
+            num_request_served = \
+            index_stats[hostname]['default'][index_name][
+                "num_completed_requests"]
+            self.log.info("# Requests served by %s = %s" % (
+                index_name, num_request_served))
+            hash_before[index_name] = num_request_served
+
+        # Kill indexer process on one node
+        node_out = self.servers[self.node_out]
+        self._kill_all_processes_index(node_out)
+
+        self.sleep(10)
+        t1.join()
+
+        # Get num_requests_completed per index after failover
+        self.sleep(10)
+        self.log.info("======AFTER=====")
+        hash_after = {}
+        index_stats = self.get_index_stats(perNode=True)
+        for i in range(0, self.num_index_replicas + 1):
+            if i == 0:
+                index_name = index_name_prefix
+            else:
+                index_name = index_name_prefix + " (replica {0})".format(
+                    str(i))
+
+            hostname, _ = self.n1ql_helper.get_index_details_using_index_name(
+                index_name, index_map)
+            num_request_served = \
+            index_stats[hostname]['default'][index_name][
+                "num_completed_requests"]
+            self.log.info("# Requests served by %s = %s" % (
+                index_name, num_request_served))
+            hash_after[index_name] = num_request_served
+
+        # Validate
+        load_balanced = True
+        for i in range(0, self.num_index_replicas + 1):
+            if i == 0:
+                index_name = index_name_prefix
+            else:
+                index_name = index_name_prefix + " (replica {0})".format(
+                    str(i))
+
+            if hash_after[index_name] <= hash_before[index_name]:
+                load_balanced = False
+
+        if not load_balanced:
+            self.fail("Load balancing not proper after failover")
+
     def _get_node_list(self, node_list=None):
         # 1. Parse node string
         if node_list:
@@ -2622,6 +3173,20 @@ class GSIReplicaIndexesTests(BaseSecondaryIndexingTests, QueryHelperTests):
                 "cbindex move started successfully : {0}".format(output))
         return output, error
 
+    def _cbindex_create(self, node, index_name, fields,bucket="default", username="Administrator", password="password",num_replica=1):
+        cmd = """cbindex -type=create -auth '{0}:{1}' -bucket {2}  -index {3} -fields={4} -using gsi -with '{{"num_replica":{5}}}'""".format(
+            username, password, bucket, index_name, fields, num_replica)
+        self.log.info(cmd)
+        remote_client = RemoteMachineShellConnection(node)
+        command = "{0}/{1}".format(self.cli_command_location, cmd)
+        output, error = remote_client.execute_command(command)
+        remote_client.log_command_output(output, error)
+        if error:
+            self.fail("cbindex create failed")
+        else:
+            self.log.info("cbindex create started successfully : {0}".format(output))
+        return output, error
+
     def _cbindexplan_plan(self, src_node, num_replica, field, bucket="default",
                           username="Administrator", password="password"):
         expect_failure = self.input.param("expect_failure", False)
@@ -2677,6 +3242,10 @@ class GSIReplicaIndexesTests(BaseSecondaryIndexingTests, QueryHelperTests):
                 expected_num_recommended_nodes = self.num_index_replicas + 1
                 if self.eq_index_node:
                     expected_num_recommended_nodes += 1
+                    if expected_node_list:
+                        expected_node_list.append(self.servers[
+                                        int(self.eq_index_node)].ip + ":" + \
+                                    self.servers[int(self.eq_index_node)].port)
 
                 self.assertEqual(expected_num_recommended_nodes, num_recommended_nodes, "cbindexplan doesnt give recommendations for all replicas" )
 
@@ -2745,3 +3314,30 @@ class GSIReplicaIndexesTests(BaseSecondaryIndexingTests, QueryHelperTests):
         if error and not filter(lambda x: 'Restore completed successfully' in x,
                                 output):
             self.fail("cbbackupmgr restore failed")
+
+    def _run_use_index(self, index, count=10):
+        select_query = "SELECT count(age) from default USE INDEX ({0} USING GSI) where age > 10".format(index)
+        for i in range(0, count):
+            try:
+                self.n1ql_helper.run_cbq_query(query=select_query,
+                                               server=self.n1ql_node)
+            except Exception, ex:
+                self.log.info(str(ex))
+                raise Exception("query with USE INDEX failed")
+            self.sleep(1)
+
+    def _run_prepare_statement(self, prepare_statement, count=10):
+        prepared_query = "EXECUTE " + prepare_statement
+        for i in range(0, count):
+            try:
+                self.n1ql_helper.run_cbq_query(query=prepared_query,
+                                               server=self.n1ql_node)
+            except Exception, ex:
+                self.log.info(str(ex))
+                raise Exception("query with prepared statement failed")
+            self.sleep(1)
+
+    def _kill_all_processes_index(self, server):
+        shell = RemoteMachineShellConnection(server)
+        shell.execute_command("killall indexer")
+

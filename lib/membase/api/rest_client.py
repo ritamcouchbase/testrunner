@@ -1,19 +1,19 @@
 import base64
 import json
-import re
+import urllib
+import httplib2
+import logger
+import traceback
 import socket
 import time
-import traceback
-import urllib
+import re
 import uuid
 from copy import deepcopy
 from threading import Thread
-
-import httplib2
-import logger
 from TestInput import TestInputSingleton
+from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA, CBAS_QUOTA
 from testconstants import COUCHBASE_FROM_VERSION_4, IS_CONTAINER
-from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA
+
 
 try:
     from couchbase_helper.document import DesignDocument, View
@@ -22,7 +22,7 @@ except ImportError:
 
 from memcached.helper.kvstore import KVStore
 from exception import ServerAlreadyJoinedException, ServerUnavailableException, InvalidArgumentException
-from membase.api.exception import BucketCreationException, ServerSelfJoinException, \
+from membase.api.exception import BucketCreationException, ServerSelfJoinException, ClusterRemoteException, \
     RebalanceFailedException, FailoverFailedException, DesignDocCreationException, QueryViewException, \
     ReadDocumentException, GetBucketInfoFailed, CompactViewFailed, SetViewInfoNotFound, AddNodeException, \
     BucketFlushFailed, CBRecoveryFailedException, XDCRException, SetRecoveryTypeFailed, BucketCompactionException
@@ -260,6 +260,7 @@ class RestConnection(object):
                 if serverInfo['fts_port']:
                     self.fts_port = serverInfo["fts_port"]
             self.hostname = ''
+            self.services = ''
             if "hostname" in serverInfo:
                 self.hostname = serverInfo["hostname"]
             if "services" in serverInfo:
@@ -314,6 +315,8 @@ class RestConnection(object):
                 self.cbas_base_url = "http://{0}:{1}".format(
                     self.cbas_node.ip,
                     self.cbas_port)
+            elif "cbas" in self.services:
+                self.cbas_base_url = "http://{0}:{1}".format(self.ip, 8095)
 
         # for Node is unknown to this cluster error
         for iteration in xrange(5):
@@ -818,32 +821,27 @@ class RestConnection(object):
             kv_quota = int(self.get_nodes_self().mcdMemoryReserved)
         info = self.get_nodes_self()
 
-
         cb_version = info.version[:5]
         if cb_version in COUCHBASE_FROM_VERSION_4:
-            if "index" in self.node_services and "fts" not in self.node_services:
+            if "index" in self.node_services:
                 log.info("quota for index service will be %s MB" % (INDEX_QUOTA))
-                kv_quota = kv_quota - INDEX_QUOTA
-                if kv_quota < MIN_KV_QUOTA:
+                kv_quota -= INDEX_QUOTA
+                log.info("set index quota to node %s " % self.ip)
+                self.set_service_memoryQuota(service='indexMemoryQuota', memoryQuota=INDEX_QUOTA)
+            if "fts" in self.node_services:
+                log.info("quota for fts service will be %s MB" % (FTS_QUOTA))
+                kv_quota -= FTS_QUOTA
+                log.info("set both index and fts quota at node %s "% self.ip)
+                self.set_service_memoryQuota(service='ftsMemoryQuota', memoryQuota=FTS_QUOTA)
+            if "cbas" in self.node_services:
+                log.info("quota for cbas service will be %s MB" % (CBAS_QUOTA))
+                kv_quota -= CBAS_QUOTA
+                self.set_service_memoryQuota(service = "cbasMemoryQuota", memoryQuota=CBAS_QUOTA)
+            kv_quota -= 1
+            if kv_quota < MIN_KV_QUOTA:
                     raise Exception("KV RAM needs to be more than %s MB"
                             " at node  %s"  % (MIN_KV_QUOTA, self.ip))
-                elif "index" in self.node_services and "fts" in self.node_services:
-                    log.info("quota for index service will be %s MB" \
-                                                      % (INDEX_QUOTA))
-                    log.info("quota for fts service will be %s MB" \
-                                                       % (FTS_QUOTA))
-                    kv_quota = kv_quota - INDEX_QUOTA - FTS_QUOTA
-                    if kv_quota < MIN_KV_QUOTA:
-                        raise Exception("KV RAM need to be more than %s MB"
-                                 " at node  %s"  % (MIN_KV_QUOTA, self.ip))
-                elif "fts" in self.node_services and "index" not in self.node_services:
-                    log.info("quota for fts service will be %s MB" \
-                                                      % (FTS_QUOTA))
-                    kv_quota = kv_quota - FTS_QUOTA
-                    if kv_quota < MIN_KV_QUOTA:
-                        raise Exception("KV RAM need to be more than %s MB"
-                                " at node  %s"  % (MIN_KV_QUOTA, server.ip))
-                    self.set_fts_memoryQuota(ftsMemoryQuota=FTS_QUOTA)
+
         log.info("quota for kv: %s MB" % kv_quota)
         self.init_cluster_memoryQuota(self.username, self.password, kv_quota)
         if cb_version in COUCHBASE_FROM_VERSION_4:
@@ -888,23 +886,14 @@ class RestConnection(object):
         status, content, header = self._http_request(api, 'POST', params)
         return status
 
-    def set_indexer_memoryQuota(self, username='Administrator',
+    def set_service_memoryQuota(self, service, username='Administrator',
                                  password='password',
-                                 indexMemoryQuota=256):
+                                 memoryQuota=256):
+        ''' cbasMemoryQuota for cbas service.
+            ftsMemoryQuota for fts service.
+            indexMemoryQuota for index service.'''
         api = self.baseUrl + 'pools/default'
-        params = urllib.urlencode({'indexMemoryQuota': indexMemoryQuota})
-        log.info('pools/default params : {0}'.format(params))
-        status, content, header = self._http_request(api, 'POST', params)
-        if status:
-            return status
-        else:
-            return content
-
-    def set_fts_memoryQuota(self, username='Administrator',
-                                 password='password',
-                                 ftsMemoryQuota=256):
-        api = self.baseUrl + 'pools/default'
-        params = urllib.urlencode({'ftsMemoryQuota': ftsMemoryQuota})
+        params = urllib.urlencode({service: memoryQuota})
         log.info('pools/default params : {0}'.format(params))
         status, content, header = self._http_request(api, 'POST', params)
         return status
@@ -980,7 +969,11 @@ class RestConnection(object):
     def execute_statement_on_cbas(self, statement, mode, pretty=True,
                                   timeout=70, client_context_id=None):
         api = self.cbas_base_url + "/analytics/service"
-        headers = {'Content-type': 'application/json'}
+        authorization = base64.encodestring('%s:%s' % (self.username, self.password))
+        headers = {'Content-Type': 'application/json',
+                'Authorization': 'Basic %s' % authorization,
+                'Accept': '*/*'}
+
         params = {'statement': statement, 'mode': mode, 'pretty': pretty,
                   'client_context_id': client_context_id}
         params = json.dumps(params)
@@ -1008,7 +1001,10 @@ class RestConnection(object):
     def delete_active_request_on_cbas(self, client_context_id):
         api = self.cbas_base_url + "/analytics/admin/active_requests?client_context_id={0}".format(
             client_context_id)
-        headers = {'Content-type': 'application/json'}
+        authorization = base64.encodestring('%s:%s' % (self.username, self.password))
+        headers = {'Content-Type': 'application/json',
+                'Authorization': 'Basic %s' % authorization,
+                'Accept': '*/*'}
 
         status, content, header = self._http_request(api, 'DELETE',
                                                      headers=headers,
@@ -1594,32 +1590,17 @@ class RestConnection(object):
     def get_index_storage_stats(self, timeout=120, index_map=None):
         api = self.index_baseUrl + 'stats/storage'
         status, content, header = self._http_request(api, timeout=timeout)
-        index_stats = dict()
-        data = content.split("\n")
-        index = "unknown"
-        store = "unknown"
-        for line in data:
-            if "Index Instance" in line:
-                index_data = re.findall(":.*", line)
-                bucket_data = re.findall(".*:", line)
-                index = index_data[0].split()[0][1:]
-                bucket = bucket_data[0].split("Index Instance")[1][:-1].strip()
-                log.info("Bucket Name: {0}".format(bucket))
-                if bucket not in index_stats.keys():
-                    index_stats[bucket] = {}
-                if index not in index_stats[bucket].keys():
-                    index_stats[bucket][index] = dict()
-                continue
-            if "Store" in line:
-                store = re.findall("[a-zA-Z]+", line)[0]
-                if store not in index_stats[bucket][index].keys():
-                    index_stats[bucket][index][store] = {}
-                continue
-            data = line.split("=")
-            if len(data) == 2:
-                metric = data[0].strip()
-                index_stats[bucket][index][store][metric] = float(data[1].strip().replace("%", ""))
-        return index_stats
+        if not status:
+            raise Exception(content)
+        json_parsed = json.loads(content)
+        index_storage_stats = {}
+        for index_stats in json_parsed:
+            bucket = index_stats["Index"].split(":")[0]
+            index_name = index_stats["Index"].split(":")[1]
+            if not bucket in index_storage_stats.keys():
+                index_storage_stats[bucket] = {}
+            index_storage_stats[bucket][index_name] = index_stats["Stats"]
+        return index_storage_stats
 
     def get_indexer_stats(self, timeout=120, index_map=None):
         api = self.index_baseUrl + 'stats'
@@ -1851,6 +1832,7 @@ class RestConnection(object):
         zoom -- stats zoom level (minute | hour | day | week | month | year)
         """
         api = self.baseUrl + 'pools/default/buckets/{0}/stats?zoom={1}'.format(bucket, zoom)
+        log.info(api)
         status, content, header = self._http_request(api)
         return json.loads(content)
 
@@ -2926,6 +2908,16 @@ class RestConnection(object):
         else:
             return None
 
+    def get_nodes_data_from_cluster(self, param="nodes"):
+        api = self.baseUrl + "pools/default/"
+        status, content, header = self._http_request(api)
+        json_parsed = json.loads(content)
+        if status:
+            if param in json_parsed:
+                return json_parsed[param]
+        else:
+            return None
+
     def flush_bucket(self, bucket="default"):
         if isinstance(bucket, Bucket):
             bucket_name = bucket.name
@@ -3651,6 +3643,20 @@ class RestConnection(object):
         else:
             return status, json.loads(content)
 
+    def set_downgrade_storage_mode_with_rest(self, downgrade=True, username="Administrator",
+                                                                   password="password"):
+        authorization = base64.encodestring('%s:%s' % (username, password))
+        if downgrade:
+            api = self.index_baseUrl + 'settings/storageMode?downgrade=true'
+        else:
+            api = self.index_baseUrl + 'settings/storageMode?downgrade=false'
+        headers = {'Content-type': 'application/json','Authorization': 'Basic %s'
+                                                                 % authorization}
+        status, content, header = self._http_request(api, 'POST', headers=headers)
+        if not status:
+            raise Exception(content)
+        return json.loads(content)
+
     def create_index_with_rest(self, create_info, username="Administrator", password="password"):
         log.info("CREATE INDEX USING REST WITH PARAMETERS: " + str(create_info))
         authorization = base64.encodestring('%s:%s' % (username, password))
@@ -3771,8 +3777,9 @@ class RestConnection(object):
         url = 'api/index/{0}?multiscancount=true'.format(id)
         api = self.index_baseUrl + url
         headers = {'Accept': 'application/json','Authorization': 'Basic %s' % authorization}
-        params = json.loads("{0}".format(body).replace('\'', '"').replace(
-            'True', 'true').replace('False', 'false'))
+        count_cmd_body = body.replace('\'', '"').replace('True', 'true').replace('False', 'false')
+        count_cmd_body = count_cmd_body.replace("~[]{}UnboundedtruenilNA~", "~[]{}UnboundedTruenilNA~")
+        params = json.loads(count_cmd_body)
         params = json.dumps(params).encode("ascii", "ignore").replace("\\\\", "\\")
         log.info(json.dumps(params).encode("ascii", "ignore"))
         status, content, header = self._http_request(api, 'GET', headers=headers,
@@ -3883,6 +3890,34 @@ class RestConnection(object):
             raise Exception(content)
         return json.loads(content)
 
+    # Applicable to eventing service
+    '''
+        Save the Function so that it is visible in UI
+    '''
+    def save_function(self, name, body, username="Administrator", password="password"):
+        authorization = base64.encodestring('%s:%s' % (self.username, self.password))
+        url = "_p/event/saveAppTempStore/?name=" + name
+        api = self.baseUrl + url
+        headers = {'Content-type': 'application/json', 'Authorization': 'Basic %s' % authorization}
+        status, content, header = self._http_request(api, 'POST', headers=headers,
+                                                     params=json.dumps(body).encode("ascii", "ignore"))
+        if not status:
+            raise Exception(content)
+        return content
+
+    '''
+            Deploy the Function
+    '''
+    def deploy_function(self, name, body, username="Administrator", password="password"):
+        authorization = base64.encodestring('%s:%s' % (self.username, self.password))
+        url = "_p/event/setApplication/?name=" + name
+        api = self.baseUrl + url
+        headers = {'Content-type': 'application/json', 'Authorization': 'Basic %s' % authorization}
+        status, content, header = self._http_request(api, 'POST', headers=headers,
+                                                     params=json.dumps(body).encode("ascii", "ignore"))
+        if not status:
+            raise Exception(content)
+        return content
 
 
 class MembaseServerVersion:

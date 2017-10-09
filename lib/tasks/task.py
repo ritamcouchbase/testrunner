@@ -1,37 +1,36 @@
-import copy
-import json
-import math
 import os
+import time
+import logger
 import random
-import re
 import socket
 import string
-import time
-import traceback
-from httplib import IncompleteRead
-from multiprocessing import Process, Manager, Semaphore
-from threading import Thread
-
+import copy
+import json
+import re
+import math
 import crc32
-import logger
+import traceback
 import testconstants
-from TestInput import TestInputServer
-from couchbase_helper.document import DesignDocument
-from couchbase_helper.documentgenerator import BatchedDocumentGenerator
-from couchbase_helper.stats_tools import StatsCommon
-from mc_bin_client import MemcachedError
+from httplib import IncompleteRead
+from threading import Thread
+from memcacheConstants import ERR_NOT_FOUND,NotFoundError
+from membase.api.rest_client import RestConnection, Bucket, RestHelper
 from membase.api.exception import BucketCreationException
+from membase.helper.bucket_helper import BucketOperationHelper
+from memcached.helper.data_helper import KVStoreAwareSmartClient, MemcachedClientHelper
+from memcached.helper.kvstore import KVStore
+from couchbase_helper.document import DesignDocument, View
+from mc_bin_client import MemcachedError
+from tasks.future import Future
+from couchbase_helper.stats_tools import StatsCommon
 from membase.api.exception import N1QLQueryException, DropIndexException, CreateIndexException, DesignDocCreationException, QueryViewException, ReadDocumentException, RebalanceFailedException, \
                                     GetBucketInfoFailed, CompactViewFailed, SetViewInfoNotFound, FailoverFailedException, \
                                     ServerUnavailableException, BucketFlushFailed, CBRecoveryFailedException, BucketCompactionException, AutoFailoverException
-from membase.api.rest_client import RestConnection, Bucket, RestHelper
-from membase.helper.bucket_helper import BucketOperationHelper
-from memcacheConstants import ERR_NOT_FOUND,NotFoundError
-from memcached.helper.data_helper import MemcachedClientHelper
-from memcached.helper.kvstore import KVStore
 from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
-from tasks.future import Future
-from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA, COUCHBASE_FROM_4DOT6, THROUGHPUT_CONCURRENCY, ALLOW_HTP
+from couchbase_helper.documentgenerator import BatchedDocumentGenerator
+from TestInput import TestInputServer, TestInputSingleton
+from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA, COUCHBASE_FROM_4DOT6, THROUGHPUT_CONCURRENCY, ALLOW_HTP, CBAS_QUOTA, COUCHBASE_FROM_VERSION_4
+from multiprocessing import Process, Manager, Semaphore
 
 try:
     CHECK_FLAG = False
@@ -137,36 +136,43 @@ class NodeInitializeTask(Task):
         if self.index_quota_percent:
             self.index_quota = int((info.mcdMemoryReserved * 2/3) * \
                                       self.index_quota_percent / 100)
-            rest.set_indexer_memoryQuota(username, password, self.index_quota)
+            rest.set_service_memoryQuota(service='indexMemoryQuota', username=username, password=password, memoryQuota=self.index_quota)
         if self.quota_percent:
            self.quota = int(info.mcdMemoryReserved * self.quota_percent / 100)
 
         """ Adjust KV RAM to correct value when there is INDEX
             and FTS services added to node from Watson  """
         index_quota = INDEX_QUOTA
+        kv_quota = int(info.mcdMemoryReserved * 2/3)
         if self.index_quota_percent:
                 index_quota = self.index_quota
         if not self.quota_percent:
             set_services = copy.deepcopy(self.services)
             if set_services is None:
                 set_services = ["kv"]
-            if "index" in set_services and "fts" not in set_services:
-                kv_quota = int(info.mcdMemoryReserved * 2/3) - index_quota
-                if kv_quota > MIN_KV_QUOTA:
-                    if kv_quota < int(self.quota):
-                        self.quota = kv_quota
-                    rest.set_indexer_memoryQuota(indexMemoryQuota=index_quota)
-                else:
-                    self.set_exception(Exception("KV RAM need to be larger than %s MB "
-                                      "at node  %s"  % (MIN_KV_QUOTA, self.server.ip)))
-            elif "index" in set_services and "fts" in set_services:
-                kv_quota = int(info.mcdMemoryReserved * 2/3) - index_quota - FTS_QUOTA
-                if kv_quota > MIN_KV_QUOTA:
-                    if kv_quota < int(self.quota):
-                        self.quota = kv_quota
-                else:
-                    self.set_exception(Exception("KV RAM need to be larger than %s MB "
-                                      "at node %s"  % (MIN_KV_QUOTA, self.server.ip)))
+#             info = rest.get_nodes_self()
+#             cb_version = info.version[:5]
+#             if cb_version in COUCHBASE_FROM_VERSION_4:
+            if "index" in set_services:
+                self.log.info("quota for index service will be %s MB" % (index_quota))
+                kv_quota -= index_quota
+                self.log.info("set index quota to node %s " % self.server.ip)
+                rest.set_service_memoryQuota(service='indexMemoryQuota', memoryQuota=index_quota)
+            if "fts" in set_services:
+                self.log.info("quota for fts service will be %s MB" % (FTS_QUOTA))
+                kv_quota -= FTS_QUOTA
+                self.log.info("set both index and fts quota at node %s "% self.server.ip)
+                rest.set_service_memoryQuota(service='ftsMemoryQuota', memoryQuota=FTS_QUOTA)
+            if "cbas" in set_services:
+                self.log.info("quota for cbas service will be %s MB" % (CBAS_QUOTA))
+                kv_quota -= CBAS_QUOTA
+                rest.set_service_memoryQuota(service = "cbasMemoryQuota", memoryQuota=CBAS_QUOTA)
+            if kv_quota < MIN_KV_QUOTA:
+                    raise Exception("KV RAM needs to be more than %s MB"
+                            " at node  %s"  % (MIN_KV_QUOTA, self.server.ip))
+            if kv_quota < int(self.quota):
+                self.quota = kv_quota
+
         rest.init_cluster_memoryQuota(username, password, self.quota)
         rest.set_indexer_storage_mode(username, password, self.gsi_type)
 
@@ -1010,7 +1016,7 @@ class LoadDocumentsGeneratorsTask(LoadDocumentsTask):
         # also check number of input generators isn't greater than
         # process_concurrency as too many generators become inefficient
         self.is_high_throughput_mode = False
-        if ALLOW_HTP:
+        if ALLOW_HTP and not TestInputSingleton.input.param("disable_HTP", False):
             self.is_high_throughput_mode = self.op_type == "create" and \
                 self.batch_size > 1 and \
                 len(self.generators) < self.process_concurrency
@@ -1806,8 +1812,8 @@ class BatchedValidateDataTask(GenericLoadingTask):
                         self.state = FINISHED
                         self.set_exception(Exception('Key: %s Bad hash result: %d != %d' % (key, crc32.crc32_hash(d), int(value))))
                 else:
-                    value = json.dumps(value)
-                    if d != json.loads(value):
+                    #value = json.dumps(value)
+                    if json.loads(d) != json.loads(value):
                         self.state = FINISHED
                         self.set_exception(Exception('Key: %s Bad result: %s != %s' % (key, json.dumps(d), value)))
                 if CHECK_FLAG and o != flag:
@@ -1893,7 +1899,7 @@ class VerifyRevIdTask(GenericLoadingTask):
         elif self.itr < (self.num_valid_keys + self.num_deleted_keys):
             # verify deleted/expired keys
             self._check_key_revId(self.src_deleted_keys[self.itr - self.num_valid_keys],
-                                  ignore_meta_data=['expiration'])
+                                  ignore_meta_data=['expiration','cas'])
         self.itr += 1
 
         # show progress of verification for every 50k items

@@ -1,42 +1,51 @@
-import copy
-import datetime
-import json
-import math
 import os
 import pprint
-import re
-import time
+import logging
+import threading
+import json
 import uuid
-from datetime import date
-
+import copy
+import math
+import re
 import testconstants
-from basetestcase import BaseTestCase
-from couchbase_helper.tuq_generators import JsonGenerator
-from membase.api.exception import CBQError
-from membase.api.rest_client import RestConnection
+from datetime import date, timedelta
+import datetime
+import time
+import random
 from remote.remote_util import RemoteMachineShellConnection
-
-#from sdk_client import SDKClient
+from couchbase_helper.tuq_generators import JsonGenerator
+from basetestcase import BaseTestCase
+from couchbase_helper.documentgenerator import DocumentGenerator
+from membase.api.exception import CBQError, ReadDocumentException
+from membase.api.rest_client import RestConnection
+from memcached.helper.data_helper import MemcachedClientHelper
+# from sdk_client import SDKClient
 from couchbase_helper.tuq_generators import TuqGenerators
+
 
 def ExplainPlanHelper(res):
     try:
-	rv = res["results"][0]["plan"]
+        rv = res["results"][0]["plan"]
     except:
-	rv = res["results"][0]
+        rv = res["results"][0]
     return rv
+
 
 def PreparePlanHelper(res):
     try:
-	rv = res["results"][0]["plan"]
+        rv = res["results"][0]["plan"]
     except:
-	rv = res["results"][0]["operator"]
+        rv = res["results"][0]["operator"]
     return rv
+
 
 class QueryTests(BaseTestCase):
     def setUp(self):
-        if not self._testMethodName == 'suite_setUp':
+        if not self._testMethodName == 'suite_setUp' and \
+                        str(self.__class__).find('upgrade_n1qlrbac') == -1:
             self.skip_buckets_handle = True
+        else:
+            self.skip_buckets_handle = False
         super(QueryTests, self).setUp()
         if self.input.param("force_clean", False):
             self.skip_buckets_handle = False
@@ -57,9 +66,11 @@ class QueryTests(BaseTestCase):
         self.docs_per_day = self.input.param("doc-per-day", 49)
         self.item_flag = self.input.param("item_flag", 4042322160)
         self.array_indexing = self.input.param("array_indexing", False)
+        self.dataset = self.input.param("dataset", "default")
         self.gens_load = self.generate_docs(self.docs_per_day)
         self.skip_load = self.input.param("skip_load", False)
         self.skip_index = self.input.param("skip_index", False)
+        self.plasma_dgm = self.input.param("plasma_dgm", False)
         self.n1ql_port = self.input.param("n1ql_port", 8093)
         #self.analytics = self.input.param("analytics",False)
         self.primary_indx_type = self.input.param("primary_indx_type", 'GSI')
@@ -84,20 +95,26 @@ class QueryTests(BaseTestCase):
         shell.disconnect()
         self.path = testconstants.LINUX_COUCHBASE_BIN_PATH
         self.curl_path = "curl"
+        self.n1ql_certs_path = "/opt/couchbase/var/lib/couchbase/n1qlcerts"
         if type.lower() == 'windows':
             self.path = testconstants.WIN_COUCHBASE_BIN_PATH
             self.curl_path = "%scurl" % self.path
+            self.n1ql_certs_path = "/cygdrive/c/Program\ Files/Couchbase/server/var/lib/couchbase/n1qlcerts"
         elif type.lower() == "mac":
             self.path = testconstants.MAC_COUCHBASE_BIN_PATH
         if self.primary_indx_type.lower() == "gsi":
-            self.gsi_type = self.input.param("gsi_type", None)
+            self.gsi_type = self.input.param("gsi_type", 'plasma')
         else:
             self.gsi_type = None
         if self.input.param("reload_data", False):
+            if self.analytics:
+                self.cluster.rebalance([self.master, self.cbas_node], [], [self.cbas_node], services=['cbas'])
             for bucket in self.buckets:
                 self.cluster.bucket_flush(self.master, bucket=bucket, timeout=180000)
             self.gens_load = self.generate_docs(self.docs_per_day)
             self.load(self.gens_load, flag=self.item_flag)
+            if self.analytics:
+                self.cluster.rebalance([self.master, self.cbas_node], [self.cbas_node], [], services=['cbas'])
         if not (hasattr(self, 'skip_generation') and self.skip_generation):
             self.full_list = self.generate_full_docs_list(self.gens_load)
         if self.input.param("gomaxprocs", None):
@@ -135,6 +152,10 @@ class QueryTests(BaseTestCase):
             if not self.input.param("skip_build_tuq", True):
                 self._build_tuq(self.master)
             self.skip_buckets_handle = True
+            if (self.analytics):
+                self.cluster.rebalance([self.master, self.cbas_node], [self.cbas_node], [], services=['cbas'])
+                self.setup_analytics()
+                self.sleep(30,'wait for analytics setup')
         except Exception, ex:
             self.log.error('SUITE SETUP FAILED')
             self.tearDown()
@@ -143,6 +164,8 @@ class QueryTests(BaseTestCase):
         if self._testMethodName == 'suite_tearDown':
             self.skip_buckets_handle = False
         if self.analytics == True:
+            bucket_username = "cbadminbucket"
+            bucket_password = "password"
             data = 'use Default ;'
             for bucket in self.buckets:
                 data += 'disconnect bucket {0} if connected;'.format(bucket.name)
@@ -153,7 +176,7 @@ class QueryTests(BaseTestCase):
             f.write(data)
             f.close()
             url = 'http://{0}:8095/analytics/service'.format(self.cbas_node.ip)
-            cmd = 'curl -s --data pretty=true --data-urlencode "statement@file.txt" ' + url
+            cmd = 'curl -s --data pretty=true --data-urlencode "statement@file.txt" ' + url + " -u " + bucket_username + ":" + bucket_password
             os.system(cmd)
             os.remove(filename)
         super(QueryTests, self).tearDown()
@@ -174,10 +197,10 @@ class QueryTests(BaseTestCase):
     def setup_analytics(self):
         data = 'use Default;'
         self.log.info("No. of buckets : %s", len(self.buckets))
+        bucket_username = "cbadminbucket"
+        bucket_password = "password"
         for bucket in self.buckets:
-            bucket_username = "cbadminbucket"
-            bucket_password = "password"
-            data += 'create bucket {0} with {{"bucket":"{0}","nodes":"{1}"}} ;'.format(bucket.name,self.master.ip)
+            data += 'create bucket {0} with {{"bucket":"{0}","nodes":"{1}"}} ;'.format(bucket.name,self.cbas_node.ip)
             data += 'create shadow dataset {1} on {0}; '.format(bucket.name,bucket.name+"_shadow")
             data += 'connect bucket {0} with {{"username":"{1}","password":"{2}"}};'.format(bucket.name, bucket_username, bucket_password)
         filename = "file.txt"
@@ -185,9 +208,24 @@ class QueryTests(BaseTestCase):
         f.write(data)
         f.close()
         url = 'http://{0}:8095/analytics/service'.format(self.cbas_node.ip)
-        cmd = 'curl -s --data pretty=true --data-urlencode "statement@file.txt" ' + url
+        cmd = 'curl -s --data pretty=true --data-urlencode "statement@file.txt" ' + url + " -u " + bucket_username + ":" + bucket_password
         os.system(cmd)
         os.remove(filename)
+
+    def get_index_storage_stats(self, timeout=120, index_map=None):
+        api = self.index_baseUrl + 'stats/storage'
+        status, content, header = self._http_request(api, timeout=timeout)
+        if not status:
+            raise Exception(content)
+        json_parsed = json.loads(content)
+        index_storage_stats = {}
+        for index_stats in json_parsed:
+            bucket = index_stats["Index"].split(":")[0]
+            index_name = index_stats["Index"].split(":")[1]
+            if not bucket in index_storage_stats.keys():
+                index_storage_stats[bucket] = {}
+            index_storage_stats[bucket][index_name] = index_stats["Stats"]
+        return index_storage_stats
 
     def get_dgm_for_plasma(self, indexer_nodes=None, memory_quota=256):
         """
@@ -200,8 +238,7 @@ class QueryTests(BaseTestCase):
                     service_type="index", get_all_nodes=True)
             for node in indexer_nodes:
                 indexer_rest = RestConnection(node)
-                indexer_rest.index_port = 9102
-                content = indexer_rest.get_index_storage_stats()
+                content = self.get_index_storage_stats()
                 for index in content.values():
                     for stats in index.values():
                         if stats["MainStore"]["resident_ratio"] >= 1.00:
@@ -214,27 +251,70 @@ class QueryTests(BaseTestCase):
             gens_load = self.generate_docs(docs)
             self.full_docs_list = self.generate_full_docs_list(gens_load)
             self.gen_results = TuqGenerators(self.log, self.full_docs_list)
-            tasks = self.async_load(generators_load=gens_load, op_type="create",
-                                batch_size=self.batch_size)
-            return tasks
-
+            self.load(gens_load, buckets=self.buckets, flag=self.item_flag,
+                  verify_data=False, batch_size=self.batch_size)
+        if self.gsi_type != "plasma":
+            return
+        if not self.plasma_dgm:
+            return
         self.log.info("Trying to get all indexes in DGM...")
         self.log.info("Setting indexer memory quota to {0} MB...".format(memory_quota))
         node = self.get_nodes_from_services_map(service_type="index")
         rest = RestConnection(node)
-        rest.set_indexer_memoryQuota(indexMemoryQuota=memory_quota)
+        rest.set_service_memoryQuota(service='indexMemoryQuota', memoryQuota=memory_quota)
         cnt = 0
-        docs = 50
+        docs = 50 + self.docs_per_day
         while cnt < 100:
             if validate_disk_writes(indexer_nodes):
                 self.log.info("========== DGM is achieved ==========")
                 return True
-            for task in kv_mutations(self, docs):
-                task.result()
+            kv_mutations(self, docs)
             self.sleep(30)
             cnt += 1
             docs += 20
         return False
+
+    def print_list_of_dicts(self, list_to_print, num_elements=10):
+        print('\n\n')
+        print('Printing a list...')
+        for item in list_to_print:
+            self.print_dict(item)
+            num_elements = num_elements-1
+            if num_elements == 0:
+                break
+
+    def print_dict(self, dict_to_print):
+        for k, v in dict_to_print.iteritems():
+            print(k, v)
+        print('\n')
+
+    def expected_substr(self, a_string, start, index):
+        if start is 0:
+            substring = a_string[index:]
+            if index >= len(a_string):
+                return None
+            elif index < -len(a_string):
+                return None
+            else:
+                return substring
+        if start is 1:
+            substring = a_string[index-start:] if index > 0 else a_string[index:]
+            if index >= len(a_string):
+                return None
+            elif index < -len(a_string):
+                return None
+            else:
+                return substring
+
+    def run_regex_query(self, word, substring, regex_type = ''):
+        self.query = "select REGEXP_POSITION%s('%s', '%s')" % (regex_type, word, substring)
+        results = self.run_cbq_query()
+        return results['results'][0]['$1']
+
+    def run_position_query(self, word, substring, position_type = ''):
+        self.query = "select POSITION%s('%s', '%s')" % (position_type, word, substring)
+        results = self.run_cbq_query()
+        return results['results'][0]['$1']
 
 
 ##############################################################################################
@@ -391,7 +471,7 @@ class QueryTests(BaseTestCase):
     def test_keywords(self):
         queries_errors = {'SELECT description as DESC FROM %s order by DESC' : ('syntax error', 3000)}
         self.negative_common_body(queries_errors)
-    
+
     def test_distinct_negative(self):
         queries_errors = {'SELECT name FROM {0} ORDER BY DISTINCT name' : ('syntax error', 3000),
                           'SELECT name FROM {0} GROUP BY DISTINCT name' : ('syntax error', 3000),
@@ -456,7 +536,6 @@ class QueryTests(BaseTestCase):
         if self.monitoring:
             self.query = "select * from system:prepareds"
             result = self.run_cbq_query()
-            print result
             self.assertTrue(result['metrics']['resultCount']==0)
         for bucket in self.buckets:
             self.query = "SELECT name, email FROM %s WHERE "  % (bucket.name) +\
@@ -470,7 +549,6 @@ class QueryTests(BaseTestCase):
             self.query = "select * from system:prepareds"
             result = self.run_cbq_query()
             self.assertTrue(result['metrics']['resultCount']==1)
-            print result
 
     def test_any_external(self):
         for bucket in self.buckets:
@@ -738,7 +816,6 @@ class QueryTests(BaseTestCase):
         if self.monitoring:
             self.query = "select * from system:prepareds"
             result = self.run_cbq_query()
-            print result
             self.assertTrue(result['metrics']['resultCount']==0)
         for bucket in self.buckets:
             self.query = "SELECT email FROM %s WHERE email " % (bucket.name) +\
@@ -748,7 +825,6 @@ class QueryTests(BaseTestCase):
             self.query = "select * from system:prepareds"
             result = self.run_cbq_query()
             self.assertTrue(result['metrics']['resultCount']==1)
-            print result
 
 
     def test_between(self):
@@ -857,13 +933,11 @@ class QueryTests(BaseTestCase):
             self.query = "select * from system:prepareds"
             result = self.run_cbq_query()
             self.assertTrue(result['metrics']['resultCount']==1)
-            print result
             self.query = "delete from system:prepareds"
             self.run_cbq_query()
             self.query = "select * from system:prepareds"
             result = self.run_cbq_query()
             self.assertTrue(result['metrics']['resultCount']==0)
-            print result
 
     def test_group_by_satisfy(self):
         for bucket in self.buckets:
@@ -1044,7 +1118,6 @@ class QueryTests(BaseTestCase):
             if self.monitoring:
                 self.query = 'select * from system:completed_requests'
                 result = self.run_cbq_query()
-                print result
                 requestID = result['requestID']
                 self.query = 'delete from system:completed_requests where requestID  =  "%s"' % requestID
                 self.run_cbq_query()
@@ -1177,20 +1250,49 @@ class QueryTests(BaseTestCase):
             self._verify_results(actual_result, expected_result)
 
     def test_substr(self):
-        for bucket in self.buckets:
-            self.query = "select name, SUBSTR(email, 7) as DOMAIN from %s" % (bucket.name)
-            actual_result = self.run_cbq_query()
-            self.query = "select name, reverse(SUBSTR(email, 7)) as REV_DOMAIN from %s" % (bucket.name)
-            actual_result1 = self.run_cbq_query()
-            #self.assertTrue(actual_result['results']==actual_result1['results'])
-            actual_result = sorted(actual_result['results'],
-                                   key=lambda doc: (doc['name'], doc['DOMAIN']))
+        indices_to_test = [-100, -2, -1, 0, 1, 2, 100]
+        for index in indices_to_test:
+            for bucket in self.buckets:
+                self.query = "select name, SUBSTR(email, %s) as DOMAIN from %s" % (str(index), bucket.name)
+                query_result = self.run_cbq_query()
+                query_docs = query_result['results']
+                sorted_query_docs = sorted(query_docs, key=lambda doc: (doc['name'], doc['DOMAIN']))
 
-            expected_result = [{"name": doc["name"], "DOMAIN" : doc['email'][7:]}
-                               for doc in self.full_list]
-            expected_result = sorted(expected_result, key=lambda doc: (doc['name'],
-                                                                       doc['DOMAIN']))
-            self._verify_results(actual_result, expected_result)
+                expected_result = [{"name": doc["name"], "DOMAIN": self.expected_substr(doc['email'], 0, index)}
+                                   for doc in self.full_list]
+                sorted_expected_result = sorted(expected_result, key=lambda doc: (doc['name'], doc['DOMAIN']))
+
+                self._verify_results(sorted_query_docs, sorted_expected_result)
+
+    def test_substr0(self):
+        indices_to_test = [-100, -2, -1, 0, 1, 2, 100]
+        for index in indices_to_test:
+            for bucket in self.buckets:
+                self.query = "select name, SUBSTR0(email, %s) as DOMAIN from %s" % (str(index), bucket.name)
+                query_result = self.run_cbq_query()
+                query_docs = query_result['results']
+                sorted_query_docs = sorted(query_docs, key=lambda doc: (doc['name'], doc['DOMAIN']))
+
+                expected_result = [{"name": doc["name"], "DOMAIN": self.expected_substr(doc['email'], 0, index)}
+                                   for doc in self.full_list]
+                sorted_expected_result = sorted(expected_result, key=lambda doc: (doc['name'], doc['DOMAIN']))
+
+                self._verify_results(sorted_query_docs, sorted_expected_result)
+
+    def test_substr1(self):
+        indices_to_test = [-100, -2, -1, 0, 1, 2, 100]
+        for index in indices_to_test:
+            for bucket in self.buckets:
+                self.query = "select name, SUBSTR1(email, %s) as DOMAIN from %s" % (str(index), bucket.name)
+                query_result = self.run_cbq_query()
+                query_docs = query_result['results']
+                sorted_query_docs = sorted(query_docs, key=lambda doc: (doc['name'], doc['DOMAIN']))
+
+                expected_result = [{"name": doc["name"], "DOMAIN": self.expected_substr(doc['email'], 1, index)}
+                                   for doc in self.full_list]
+                sorted_expected_result = sorted(expected_result, key=lambda doc: (doc['name'], doc['DOMAIN']))
+
+                self._verify_results(sorted_query_docs, sorted_expected_result)
 
     def test_trunc(self):
         for bucket in self.buckets:
@@ -1226,6 +1328,30 @@ class QueryTests(BaseTestCase):
 #
 #   AGGR FN
 ##############################################################################################
+
+    def test_agg_counters(self):
+        vals = []
+        keys = []
+        for i in range(10):
+            new_val = random.randint(0, 99)
+            new_counter = "counter_US"+str(i)
+            vals.append(new_val)
+            keys.append(new_counter)
+            self.query = 'INSERT INTO default VALUES ("%s",%s)' % (new_counter, new_val)
+            self.run_cbq_query()
+
+        self.query = 'SELECT sum(default) FROM default USE KEYS %s;' % (str(keys))
+        actual_results = self.run_cbq_query()
+        self.assertEqual(actual_results['results'][0]['$1'], sum(vals))
+
+        self.query = 'SELECT avg(default) FROM default USE KEYS %s;' % (str(keys))
+        actual_results = self.run_cbq_query()
+        self.assertEqual(actual_results['results'][0]['$1'], float(sum(vals)) / max(len(vals), 1))
+
+        self.query = 'DELETE FROM default USE KEYS %s;' % (str(keys))
+        actual_results = self.run_cbq_query()
+        self.assertEqual(actual_results['results'], [])
+
 
     def test_sum(self):
         for bucket in self.buckets:
@@ -2260,7 +2386,7 @@ class QueryTests(BaseTestCase):
                                if doc['name'] == 'employee-4']
             expected_result = sorted(expected_result, key=lambda doc: (doc['name']))
             self._verify_results(actual_result, expected_result)
-            
+
             self.query = "SELECT name FROM %s WHERE " % (bucket.name)+\
             "name == 'employee-4'"
             actual_result = self.run_cbq_query()
@@ -2436,7 +2562,6 @@ class QueryTests(BaseTestCase):
         if self.monitoring:
             self.query = "select * from system:prepareds"
             result = self.run_cbq_query()
-            print result
             self.assertTrue(result['metrics']['resultCount']==0)
         for bucket in self.buckets:
             self.query = "SELECT name, email FROM %s WHERE "  % (bucket.name) +\
@@ -2450,7 +2575,6 @@ class QueryTests(BaseTestCase):
             self.query = "select * from system:prepareds"
             result = self.run_cbq_query()
             self.assertTrue(result['metrics']['resultCount']==1)
-            print result
             name = result['results'][0]['prepareds']['name']
             self.query = 'delete from system:prepareds where name = "%s" '  % name
             result = self.run_cbq_query()
@@ -2717,8 +2841,7 @@ class QueryTests(BaseTestCase):
         for bucket in self.buckets:
             res = self.run_cbq_query()
             self.log.info(res)
-	    plan = ExplainPlanHelper(res)
-            print plan['~children'][2]['~child']['~children'][0]['scan']['index']
+            plan = ExplainPlanHelper(res)
             self.assertTrue(plan['~children'][2]['~child']['~children'][0]['scan']['index'] == index,
                             "wrong index used")
 
@@ -2785,9 +2908,7 @@ class QueryTests(BaseTestCase):
 
     def test_clock_millis(self):
         self.query = "select clock_millis() as now"
-        now = time.time()
         res = self.run_cbq_query()
-        print res
         self.assertFalse("error" in str(res).lower())
 
 
@@ -2837,7 +2958,6 @@ class QueryTests(BaseTestCase):
         now = datetime.datetime.now()
         today = date.today()
         res = self.run_cbq_query()
-        print res
         expected = "%s-%02d-%02dT" % (today.year, today.month, today.day,)
         self.assertFalse("error" in str(res).lower())
 
@@ -2969,7 +3089,7 @@ class QueryTests(BaseTestCase):
                                    "join_yr" : doc['join_yr'],
                                     "join_mo": doc['join_mo'],
                                     "join_day": doc['join_day']} for doc in actual_result["results"]])
-    
+
                 expected_result = [{"date" : '%s-0%s-0%s' % (doc['join_yr'],
                                     doc['join_mo'], doc['join_day']),
                                     "join_yr" : doc['join_yr'],
@@ -3143,7 +3263,7 @@ class QueryTests(BaseTestCase):
     def test_split_where(self):
         for bucket in self.buckets:
             self.query = 'SELECT name FROM %s' % (bucket.name) +\
-            ' WHERE SPLIT(email, \'-\')[0] = SPLIT(name, \'-\')[1]' 
+            ' WHERE SPLIT(email, \'-\')[0] = SPLIT(name, \'-\')[1]'
 
             actual_list = self.run_cbq_query()
             actual_result = sorted(actual_list['results'])
@@ -3803,7 +3923,7 @@ class QueryTests(BaseTestCase):
         actual_list = self.run_cbq_query()
         expected_result = [{'$1': 60}]
         self._verify_results(actual_list['results'], expected_result)
-        
+
     def test_asin(self):
         self.query = "select degrees(asin(0.5))"
         actual_list = self.run_cbq_query()
@@ -3955,8 +4075,7 @@ class QueryTests(BaseTestCase):
 
             actual_list = self.run_cbq_query()
             actual_result = sorted(actual_list['results'])
-            expected_result = [{"pos" : (doc["VMs"][1]["name"].find('vm'))}
-                               for doc in self.full_list]
+            expected_result = [{"pos" : (doc["VMs"][1]["name"].find('vm'))} for doc in self.full_list]
             expected_result = sorted(expected_result)
             self._verify_results(actual_result, expected_result)
             self.query = "select POSITION(VMs[1].name, 'server') pos from %s" % (bucket.name)
@@ -3966,6 +4085,56 @@ class QueryTests(BaseTestCase):
                                for doc in self.full_list]
             expected_result = sorted(expected_result)
             self._verify_results(actual_result, expected_result)
+
+            test_word = 'california'
+        for letter in test_word:
+            actual = self.run_position_query(test_word, letter)
+            expected = test_word.find(letter)
+            self.assertEqual(actual, expected)
+
+        letter = ''
+        actual = self.run_position_query(test_word, letter)
+        expected = test_word.find(letter)
+        self.assertEqual(actual, expected)
+
+        letter = 'd'
+        actual = self.run_position_query(test_word, letter)
+        expected = test_word.find(letter)
+        self.assertEqual(actual, expected)
+
+    def test_position0(self):
+        test_word = 'california'
+        for letter in test_word:
+            actual = self.run_position_query(test_word, letter, position_type = '0')
+            expected = test_word.find(letter)
+            self.assertEqual(actual, expected)
+
+        letter = ''
+        actual = self.run_position_query(test_word, letter, position_type = '0')
+        expected = test_word.find(letter)
+        self.assertEqual(actual, expected)
+
+        letter = 'd'
+        actual = self.run_position_query(test_word, letter, position_type = '0')
+        expected = test_word.find(letter)
+        self.assertEqual(actual, expected)
+
+    def test_position1(self):
+        test_word = 'california'
+        for letter in test_word:
+            actual = self.run_position_query(test_word, letter, position_type = '1')
+            expected = test_word.find(letter) + 1
+            self.assertEqual(actual, expected)
+
+        letter = ''
+        actual = self.run_position_query(test_word, letter, position_type = '1')
+        expected = test_word.find(letter) + 1
+        self.assertEqual(actual, expected)
+
+        letter = 'd'
+        actual = self.run_position_query(test_word, letter, position_type = '1')
+        expected = test_word.find(letter) + 1
+        self.assertEqual(actual, expected)
 
     def test_regex_contains(self):
         for bucket in self.buckets:
@@ -3999,19 +4168,55 @@ class QueryTests(BaseTestCase):
             self._verify_results(actual_result, expected_result)
 
     def test_regex_position(self):
-        for bucket in self.buckets:
-            self.query = "select email from %s where REGEXP_POSITION(email, '-m..l*') = 10" % (bucket.name)
+        test_word = 'california'
+        for letter in test_word:
+            actual = self.run_regex_query(test_word, letter)
+            expected = test_word.find(letter)
+            self.assertEqual(actual, expected)
 
-            actual_list = self.run_cbq_query()
-            actual_result = sorted(actual_list['results'])
-            self.query = "select email from %s where REGEXP_POSITION(REVERSE(email), '*l..m-') = 10" % (bucket.name)
-            #actual_list1 = self.run_cbq_query()
-            #actual_result1 = sorted(actual_list1['results'])
-            expected_result = [{"email" : doc["email"]}
-                               for doc in self.full_list
-                               if doc['email'].find('-m') == 10]
-            expected_result = sorted(expected_result)
-            self._verify_results(actual_result, expected_result)
+        letter = ''
+        actual = self.run_regex_query(test_word, letter)
+        expected = test_word.find(letter)
+        self.assertEqual(actual, expected)
+
+        letter = 'd'
+        actual = self.run_regex_query(test_word, letter)
+        expected = test_word.find(letter)
+        self.assertEqual(actual, expected)
+
+    def test_regex_position0(self):
+        test_word = 'california'
+        for letter in test_word:
+            actual = self.run_regex_query(test_word, letter, regex_type = '0')
+            expected = test_word.find(letter)
+            self.assertEqual(actual, expected)
+
+        letter = ''
+        actual = self.run_regex_query(test_word, letter, regex_type = '0')
+        expected = test_word.find(letter)
+        self.assertEqual(actual, expected)
+
+        letter = 'd'
+        actual = self.run_regex_query(test_word, letter, regex_type = '0')
+        expected = test_word.find(letter)
+        self.assertEqual(actual, expected)
+
+    def test_regex_position1(self):
+        test_word = 'california'
+        for letter in test_word:
+            actual = self.run_regex_query(test_word, letter, regex_type = '1')
+            expected = test_word.find(letter) + 1
+            self.assertEqual(actual, expected)
+
+        letter = ''
+        actual = self.run_regex_query(test_word, letter, regex_type = '1')
+        expected = test_word.find(letter) + 1
+        self.assertEqual(actual, expected)
+
+        letter = 'd'
+        actual = self.run_regex_query(test_word, letter, regex_type = '1')
+        expected = test_word.find(letter)
+        self.assertEqual(actual, expected)
 
     def test_regex_replace(self):
         for bucket in self.buckets:
@@ -4214,7 +4419,7 @@ class QueryTests(BaseTestCase):
                 for bucket in self.buckets:
                     query = query.replace(bucket.name,bucket.name+"_shadow")
                 self.log.info('RUN QUERY %s' % query)
-                result = rest.execute_statement_on_cbas(query, "immediate")
+                result = RestConnection(self.cbas_node).execute_statement_on_cbas(query, "immediate")
                 result = json.loads(result)
             else :
                 result = rest.query_tool(query, self.n1ql_port, query_params=query_params,

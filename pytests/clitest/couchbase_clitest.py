@@ -2,19 +2,21 @@ import copy
 import json
 import os
 import random
-import re
-import string
+import string, re
 import time
 from threading import Thread
 
 from TestInput import TestInputSingleton
 from clitest.cli_base import CliBaseTest
 from couchbase_cli import CouchbaseCLI
+from upgrade.newupgradebasetest import NewUpgradeBaseTest
+from security.rbacmain import rbacmain
+from security.rbac_base import RbacBase
 from membase.api.rest_client import RestConnection
 from memcached.helper.data_helper import MemcachedClientHelper
 from remote.remote_util import RemoteMachineShellConnection
 from testconstants import CLI_COMMANDS, COUCHBASE_FROM_SPOCK, \
-                          COUCHBASE_FROM_SHERLOCK,\
+                          COUCHBASE_FROM_WATSON, COUCHBASE_FROM_SHERLOCK,\
                           COUCHBASE_FROM_4DOT6
 
 help = {'CLUSTER': '--cluster=HOST[:PORT] or -c HOST[:PORT]',
@@ -220,13 +222,14 @@ help_short = {'COMMANDs include': {'bucket-compact': 'compact database and index
  'usage': ' couchbase-cli COMMAND CLUSTER [OPTIONS]'}
 
 
-class CouchbaseCliTest(CliBaseTest):
+class CouchbaseCliTest(CliBaseTest, NewUpgradeBaseTest):
     REBALANCE_RUNNING = "Rebalance is running"
     REBALANCE_NOT_RUN = "Rebalance is not running"
 
     def setUp(self):
         TestInputSingleton.input.test_params["default_bucket"] = False
         super(CouchbaseCliTest, self).setUp()
+
 
     def tearDown(self):
         super(CouchbaseCliTest, self).tearDown()
@@ -704,7 +707,7 @@ class CouchbaseCliTest(CliBaseTest):
         if name and (name[0] == name[-1]) and name.startswith(("'", '"')):
             name = name[1:-1]
         if not index_storage_mode and services and "index" in services:
-            index_storage_mode = "forestdb"
+            index_storage_mode = "plasma"
         if not services:
             services = "data"
 
@@ -966,6 +969,9 @@ class CouchbaseCliTest(CliBaseTest):
         compact_interval = self.input.param("compact_interval", None)
         from_period = self.input.param("from_period", None)
         to_period = self.input.param("to_period", None)
+        if compact_interval is None:
+            from_period = "0:0"
+            to_period = "0:0"
         enable_abort = self.input.param("enable_abort", 0)
         expect_error = self.input.param("expect-error", False)
         error_msg = self.input.param("error-msg", "")
@@ -1457,7 +1463,7 @@ class CouchbaseCliTest(CliBaseTest):
             self.assertTrue(self.verifyCommandOutput(stdout, expect_error, "Bucket edited"),
                             "Expected command to succeed")
             self.assertTrue(self.verifyBucketSettings(server, bucket_name, None, memory_quota,
-                                                      eviction_policy, replica_count, None, priority, enable_flush),
+                                eviction_policy, replica_count, None, priority, enable_flush),
                             "Bucket settings not set properly")
         else:
             # List buckets
@@ -1529,6 +1535,8 @@ class CouchbaseCliTest(CliBaseTest):
                 _, _, success = cli.bucket_create(bucket_name, init_bucket_type, 256, None, None, None,
                                                   None, init_enable_flush, None)
                 self.assertTrue(success, "Bucket not created during test setup")
+                """ Add built-in user for memcached authentication """
+                self.add_built_in_server_user(node=server)
 
                 MemcachedClientHelper.load_bucket_and_return_the_keys([server], name=bucket_name, number_of_threads=1,
                                                                       write_only=True, number_of_items=insert_keys,
@@ -1578,14 +1586,17 @@ class CouchbaseCliTest(CliBaseTest):
 
         if initialized:
             cli = CouchbaseCLI(server, server.rest_username, server.rest_password)
-            _, _, success = cli.cluster_init(256, 256, None, init_services, init_index_storage_mode, None,
-                                             server.rest_username, server.rest_password, None)
+            _, _, success = cli.cluster_init(256, 256, None, init_services,
+                                             init_index_storage_mode, None,
+                                             server.rest_username, server.rest_password,
+                                             None)
             self.assertTrue(success, "Cluster initialization failed during test setup")
 
         time.sleep(5)
         cli = CouchbaseCLI(server, username, password)
-        stdout, _, _ = cli.server_add(server_to_add, server_username, server_password, group, services,
-                                      index_storage_mode)
+        stdout, _, _ = cli.server_add(server_to_add, server_username, server_password,
+                                                     group, services,
+                                                     index_storage_mode)
 
         if not services:
             services = "kv"
@@ -1603,8 +1614,9 @@ class CouchbaseCliTest(CliBaseTest):
                             "Expected command to succeed")
             self.assertTrue(self.verifyPendingServer(server, server_to_add, group, services),
                             "Pending server has incorrect settings")
-            self.assertTrue(self.verifyIndexSettings(server, None, None, None, index_storage_mode, None, None),
-                            "Invalid index storage setting")
+            self.assertTrue(self.verifyIndexSettings(server, None, None, None,
+                                                     index_storage_mode, None, None),
+                                                     "Invalid index storage setting")
         else:
             self.assertTrue(self.verifyCommandOutput(stdout, expect_error, error_msg),
                             "Expected error message not found")
@@ -1766,44 +1778,71 @@ class CouchbaseCliTest(CliBaseTest):
         list = self.input.param("list", False)
         delete = self.input.param("delete", False)
         set = self.input.param("set", False)
-        ro_username = self.input.param("ro-username", None)
-        ro_password = self.input.param("ro-password", None)
+        roles = self.input.param("roles", None)
+        rbac_username = self.input.param("rbac-username", None)
+        rbac_password = self.input.param("rbac-password", None)
+        auth_domain = self.input.param("auth-domain", None)
         initialized = self.input.param("initialized", True)
         expect_error = self.input.param("expect-error")
         error_msg = self.input.param("error-msg", "")
 
-        init_ro_username = self.input.param("init-ro-username", None)
-        init_ro_password = self.input.param("init-ro-password", None)
+        init_rbac_username = self.input.param("init-rbac-username", None)
+        init_rbac_password = self.input.param("init-rbac-password", None)
 
         server = copy.deepcopy(self.servers[0])
 
         rest = RestConnection(server)
         rest.force_eject_node()
 
+        payload = "name=%s&roles=%s" % (init_rbac_username, roles)
+        if auth_domain == "local":
+            init_user = "local/" + init_rbac_username
+            rbac_user = "local/" + rbac_username
+            payload = "name=%s&roles=%s&password=%s" \
+                      % (init_rbac_username, roles, init_rbac_password)
+        elif auth_domain == "external":
+            init_user = "external/" + init_rbac_username
+            rbac_user = "external/" + rbac_username
+        else:
+            self.fail("need to set auth-domain to run this test")
+
         if initialized:
             cli = CouchbaseCLI(server, server.rest_username, server.rest_password)
-            _, _, success = cli.cluster_init(256, 256, None, "data", None, None, server.rest_username,
+            _, _, success = cli.cluster_init(256, 256, None, "data", None, None,
+                                             server.rest_username,
                                              server.rest_password, None)
             self.assertTrue(success, "Cluster initialization failed during test setup")
-            if init_ro_username and init_ro_password:
-                self.assertTrue(rest.create_ro_user(init_ro_username, init_ro_password), "Setting initial ro user failed")
+            if init_rbac_username and init_rbac_password:
+                rest.set_user_roles(init_user, payload)
+                result = self.verifyUserRoles(server, init_rbac_username, roles)
+                self.assertTrue(result,
+                                "Setting initial rbac user failed")
 
         time.sleep(5)
         cli = CouchbaseCLI(server, username, password)
-        stdout, _, errored = cli.user_manage(delete, list, set, ro_username, ro_password)
+        stdout, _, errored = cli.user_manage(delete, list, set, rbac_username, rbac_password,
+                                             roles, auth_domain)
 
         if not expect_error:
             if list:
-                self.assertTrue(stdout[0] == init_ro_username, "Listed ro user is not correct")
+                self.assertTrue(stdout[0] == init_rbac_username,
+                                "Listed rbac user is not correct")
             else:
                 self.assertTrue(errored, "Expected command to succeed")
             if set:
-                self.assertTrue(self.verifyReadOnlyUser(server, ro_username), "Read only user was not set")
+                self.assertTrue(self.verifyUserRoles(server, rbac_username, roles),
+                                "Read only user was not set")
         else:
             self.assertTrue(self.verifyCommandOutput(stdout, expect_error, error_msg),
                             "Expected error message not found")
-            if initialized and init_ro_username:
-                self.assertTrue(self.verifyReadOnlyUser(server, init_ro_username), "Read only user was changed")
+            if initialized and init_rbac_username:
+                self.assertTrue(self.verifyUserRoles(server, init_rbac_username, roles),
+                                "Read only user was changed")
+        self.log.info("Delete users after test")
+        if init_rbac_username:
+            rest.delete_user_roles(init_user)
+        elif rbac_username:
+            rest.delete_user_roles(rbac_user)
 
     def testCollectLogStart(self):
         username = self.input.param("username", None)
@@ -1822,6 +1861,9 @@ class CouchbaseCliTest(CliBaseTest):
         init_num_servers = self.input.param("init-num-servers", 1)
 
         server = copy.deepcopy(self.servers[0])
+        if len(self.servers) < 4:
+            mesg = "***\n Collect logs start tests need minimum 4 servers to run\n***"
+            RemoteMachineShellConnection(server).stop_current_python_running(mesg)
 
         rest = RestConnection(server)
         rest.force_eject_node()
@@ -2086,6 +2128,9 @@ class CouchbaseCliTest(CliBaseTest):
         invalid_recover_server = self.input.param("invalid-recover-server", None)
 
         server = copy.deepcopy(self.servers[0])
+        if len(self.servers) < 4:
+            mesg = "***\n Sever readd tests need minimum 4 servers to run\n***"
+            RemoteMachineShellConnection(server).stop_current_python_running(mesg)
 
         rest = RestConnection(server)
         rest.force_eject_node()
@@ -2094,7 +2139,8 @@ class CouchbaseCliTest(CliBaseTest):
         if servers > 0:
             servers_to_recover = []
             for idx in range(servers):
-                servers_to_recover.append("%s:%s" % (self.servers[idx + 1].ip, self.servers[idx + 1].port))
+                servers_to_recover.append("%s:%s" % (self.servers[idx + 1].ip,
+                                                     self.servers[idx + 1].port))
             servers_to_recover = ",".join(servers_to_recover)
 
         if invalid_recover_server:
@@ -2102,19 +2148,21 @@ class CouchbaseCliTest(CliBaseTest):
 
         servers_to_add = []
         for idx in range(init_num_servers - 1):
-            servers_to_add.append("%s:%s" % (self.servers[idx + 1].ip, self.servers[idx + 1].port))
+            servers_to_add.append("%s:%s" % (self.servers[idx + 1].ip,
+                                             self.servers[idx + 1].port))
         servers_to_add = ",".join(servers_to_add)
 
         if initialized:
             cli = CouchbaseCLI(server, server.rest_username, server.rest_password)
-            _, _, success = cli.cluster_init(256, 256, None, "data", None, None, server.rest_username,
+            _, _, success = cli.cluster_init(256, 256, None, "data", None, None,
+                                             server.rest_username,
                                              server.rest_password, None)
             self.assertTrue(success, "Cluster initialization failed during test setup")
 
             if init_num_servers > 1:
                 time.sleep(5)
-                _, _, errored = cli.server_add(servers_to_add, server.rest_username, server.rest_password, None, None,
-                                               None)
+                _, _, errored = cli.server_add(servers_to_add, server.rest_username,
+                                               server.rest_password, None, None, None)
                 self.assertTrue(errored, "Could not add initial servers")
                 _, _, errored = cli.rebalance(None)
                 self.assertTrue(errored, "Unable to complete initial rebalance")
@@ -2130,10 +2178,11 @@ class CouchbaseCliTest(CliBaseTest):
 
         if not expect_error:
             self.assertTrue(errored, "Expected command to succeed")
-            self.assertTrue(self.verifyRecoveryType(server, servers_to_recover, "full"), "Servers not recovered")
+            self.assertTrue(self.verifyRecoveryType(server, servers_to_recover, "full"),
+                                                               "Servers not recovered")
         else:
             self.assertTrue(self.verifyCommandOutput(stdout, expect_error, error_msg),
-                            "Expected error message not found")
+                                                   "Expected error message not found")
 
     def test_change_admin_password_with_read_only_account(self):
         """ this test automation for bug MB-20170.
@@ -2416,7 +2465,8 @@ class CouchbaseCliTest(CliBaseTest):
         output, error = remote_client.execute_couchbase_cli(
             cli_command=cli_command, options=options, cluster_host="127.0.0.1",
             cluster_port=8091, user="Administrator", password="password")
-        self.assertEqual(output, ['{"errors":{"_":"The password must be at least six characters."}}'])
+        self.assertEqual(output,
+                    ['{"errors":{"_":"The password must be at least 6 characters long."}}'])
         try:
             options = '--regenerate'
             outputs = []
@@ -2475,6 +2525,219 @@ class CouchbaseCliTest(CliBaseTest):
             remote_client.execute_couchbase_cli(
                 cli_command=cli_command, options=options, cluster_host="127.0.0.1",
                 cluster_port=8091, user="Administrator", password="password")
+
+    def test_cli_with_offline_upgrade(self):
+        """
+           Install a node with watson
+           Create users with roles
+           Upgrade to spock
+           Verify users still in cluster.
+           Add more users with different roles
+           parameters in conf file:
+               conf/couchbase-cli/py-offline-upgrade-rbac.conf
+        """
+        username = self.input.param("username", "Administrator")
+        new_users = self.input.param("new-users", None)
+        password = self.input.param("password", "password")
+        new_password = self.input.param("new-password", None)
+        command = self.input.param("command", None)
+        sub_command = self.input.param("sub-command", None)
+        new_users = self.input.param("new-users", None)
+        new_roles = self.input.param("new-roles", None)
+        enabled = self.input.param("enabled", False)
+        default = self.input.param("default", None)
+        self.bucket_type = self.input.param("bucket-type", "couchbase")
+        self.bucket_ram = self.input.param("bucket-ram", 256)
+        self.eviction_policy = self.input.param("eviction-policy", "fullEviction")
+        replica_count = self.input.param("replica-count", 1)
+        enable_index_replica = self.input.param("enable-replica-index", 1)
+        self.priority = self.input.param("priority", "high")
+        self.enable_flush = self.input.param("enable-flush", 0)
+        ops_before_upgrade = self.input.param("ops-before-upgrade", False)
+        ops_during_upgrade = self.input.param("ops-during-upgrade", False)
+        ops_after_upgrade = self.input.param("ops-after-upgrade", False)
+
+        self.log.info("Check OS if it is supported in old cb version")
+        if "centos 7" in self.os_version:
+            if self.initial_version[:5] not in COUCHBASE_FROM_SHERLOCK:
+                print "\n%s is not supported in %s\n"\
+                      "you need to get server with os supported!\n"\
+                                                 % (self.initial_version,
+                                                    self.os_version)
+                raise Exception("Not support OS")
+
+        """
+            Start install old version with param initial_version
+        """
+        self._install(self.servers[:self.nodes_init])
+        self.cluster.rebalance([self.master], self.servers[1:self.nodes_init], [])
+
+        """
+            During upgrade operations
+        """
+        self._offline_upgrade(skip_init=True)
+
+        """
+            After upgrade operations
+        """
+        self.sleep(5)
+
+        if new_users and new_roles:
+            self.log.info("Add new users with roles after upgrade to version %s"
+                                % self.upgrade_versions)
+            testuser = [{"id": "%s" % new_users,
+                         "name": "%s" % new_users,
+                         "password": "password"}]
+            rolelist = [{"id": "%s" % new_users,
+                         "name": "%s" % new_users,
+                         "roles": "%s" % new_roles}]
+            try:
+                status = self.add_built_in_server_user(testuser, rolelist)
+                if not status:
+                    self.fail("Failed to add user: %s with role: %s "
+                                                 % (new_users, new_roles))
+                self.log.info("Verify rbac user added after upgrade ")
+                found = self._verify_rbac_users(self.master, username, password,
+                                                            new_users, new_roles)
+                if not found:
+                    self.fail("Failed to add rbac user in")
+                self.log.info("Run CLI command with new user")
+                cmd = "%s%s%s " % (self.cli_command_path, command, self.cmd_ext)
+                if sub_command:
+                    cmd += "%s --cluster %s --user %s --password %s " \
+                           % (sub_command, self.master.ip, username, password)
+                if command and sub_command:
+                    self.shell.execute_command(cmd)
+                rest = RestConnection(self.master)
+                cb_version = rest.get_nodes_version()
+                if cb_version[:5] in COUCHBASE_FROM_WATSON:
+                    if self.debug_logs:
+                        print "output from exe command  ", output
+            except Exception as e:
+                if e:
+                    print "Exception error:   ", e
+
+            self.log.info("Operation after upgrade")
+            if ops_after_upgrade == "bucket-ops":
+                self._bucket_ops(self.master, new_users, password, new_roles)
+
+            self.shell.disconnect()
+
+    def _verify_rbac_users(self, server, login_user, login_password, users, roles):
+        cmd = "%scouchbase-cli%s user-manage " % (self.cli_command_path,
+                                                  self.cmd_ext)
+        cmd += "-c %s -u %s -p %s --list" % (server.ip, login_user, login_password)
+        shell = RemoteMachineShellConnection(server)
+
+        users_found = False
+        roles_found = False
+        found = False
+        output, _ = shell.execute_command(cmd)
+        shell.disconnect()
+
+        output = map(lambda x: x.strip(), output)
+        output = map(lambda x: x.strip(","), output)
+        if self.debug_logs:
+            print "output from verify rbac users:\n", output
+        for x in output:
+            if users in x:
+                users_found = True
+            if "]" in roles:
+                roles_name = re.sub("[\[].*?[\]]", "", roles)
+            if roles_name in x:
+                roles_found = True
+        if users_found and roles_found:
+            self.log.info("Users '%s' and roles '%s' found in cluster"
+                                                       % ( users, roles))
+            found = True
+        return found
+
+    def _bucket_ops(self, server, user, password, roles):
+        self.log.info("Do some bucket operation like create, delete")
+        bucket_create_roles = ["admin", "cluster_admin"]
+        cli = CouchbaseCLI(server, user, password)
+        try:
+            self.log.info("Create bucket 'bucket1' with roles %s" % roles)
+            cli.bucket_create("bucket1", self.bucket_type, 256,
+                                         self.eviction_policy, 1,
+                                         1, self.priority,
+                                         0, True)
+            self.buckets = RestConnection(server).get_buckets()
+            bucket_found = False
+            for bucket in self.buckets:
+                if bucket.name == "bucket1":
+                    if roles not in bucket_create_roles:
+                        self.fail("Roles %s should not have permission"
+                                  "to create bucket." % roles)
+                    self.log.info("Found bucket '%s' in cluster" % bucket.name)
+                    bucket_found = True
+            if not bucket_found:
+                self.fail("Failed to create bucket by user %s with roles: %s"
+                                                               % (user, roles))
+        except Exception, e:
+            if e and roles not in bucket_create_roles:
+                print "\nBucket permission of roles '%s' is enforced\n" % roles
+                self.log.info("Create bucket with admin roles for next test")
+                cli = CouchbaseCLI(server, "Administrator", password)
+                cli.bucket_create("bucket1", self.bucket_type, self.bucket_ram,
+                                             self.eviction_policy, 1,
+                                             1, self.priority,
+                                             self.enable_flush, True)
+
+        self.log.info("Enable flush and flush bucket")
+        bucket_edit_roles = ["admin", "cluster_admin", "bucket_admin[*]"]
+        cli = CouchbaseCLI(server, user, password)
+        output, _, _ = cli.bucket_edit("bucket1", self.bucket_ram,
+                                                  self.eviction_policy, 1,
+                                                  self.priority, 1)
+        if "SUCCESS: Bucket edited" not in output:
+            if roles in bucket_edit_roles:
+                self.fail("Failed to edit bucket with roles %s " % roles)
+            else:
+                self.log.info("%s has no permision to edit bucket" % roles)
+                print "\nEnable flush with admin roles for next test\n"
+                cli = CouchbaseCLI(server, "Administrator", password)
+                cli.bucket_edit("bucket1", self.bucket_ram,
+                                self.eviction_policy, 1,
+                                self.priority, 1)
+
+        self.log.info("Load data to bucket")
+        shell = RemoteMachineShellConnection(server)
+        cmd = "%scbworkloadgen%s -c %s:8091 -j -u %s -p %s -b bucket1 " \
+                                              % (self.cli_command_path,
+                                                 self.cmd_ext,
+                                                 server.ip,
+                                                 "Administrator",
+                                                 "password")
+        shell.execute_command(cmd)
+        shell.disconnect()
+        cli = CouchbaseCLI(server, user, password)
+        cli.bucket_flush("bucket1", True)
+        rest = RestConnection(server)
+        bucket_items = rest.get_active_key_count("bucket1")
+        if int(bucket_items) != 0 :
+            if roles in bucket_edit_roles:
+                self.fail("Failed to flush bucket with roles %s" % roles)
+            else:
+                self.log.info("%s has no permision to flush bucket" % roles)
+        else:
+            self.log.info("Roles %s success flush bucket " % roles)
+
+        try:
+            self.log.info("Delete bucket 'bucket1")
+            cli = CouchbaseCLI(server, user, password)
+            cli.bucket_delete("bucket1")
+            self.buckets = RestConnection(server).get_buckets()
+            for bucket in self.buckets:
+                if bucket.name == "bucket1":
+                    if roles in bucket_create_roles:
+                        self.fail("Roles %s failed to delete bucket." % roles)
+                    else:
+                        self.log.info(
+                            "%s has no permision to delete bucket" % roles)
+        except Exception, e:
+            if e:
+                print "\n%s\n", e
 
 
 class XdcrCLITest(CliBaseTest):
@@ -2788,6 +3051,18 @@ class XdcrCLITest(CliBaseTest):
         options += (" --filter-expression=\'{0}\'".format(filter_expression), "")[filter_expression is None]
         options += (" --checkpoint-interval=\'{0}\'".format(checkpoint_interval), "")[timeout_perc_cap is None]
 
+        # Add built-in user to dest_nodes
+        testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
+        RbacBase().create_user_source(testuser, 'builtin', self.dest_nodes[0])
+
+        time.sleep(10)
+
+        # Assign user to role
+        role_list = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'roles': 'admin'}]
+        RbacBase().add_user_role(role_list, RestConnection(self.dest_nodes[0]), 'builtin')
+
+        time.sleep(10)
+
         self.bucket_size = self._get_bucket_size(self.quota, 1)
         if from_bucket:
             bucket_params = self._create_bucket_params(server=self.master, size=self.bucket_size,
@@ -2795,10 +3070,12 @@ class XdcrCLITest(CliBaseTest):
                                                               enable_replica_index=self.enable_replica_index)
             self.cluster.create_default_bucket(bucket_params)
         if to_bucket:
-            bucket_params = self._create_bucket_params(server=self.servers[xdcr_hostname], size=self.bucket_size,
+            bucket_params = self._create_bucket_params(server=self.dest_nodes[0], size=self.bucket_size,
                                                               replicas=self.num_replicas,
                                                               enable_replica_index=self.enable_replica_index)
             self.cluster.create_default_bucket(bucket_params)
+
+        self.sleep(10)
         output, _ = self.__execute_cli(cli_command, options)
         if not error_expected:
             self.assertEqual(XdcrCLITest.XDCR_REPLICATE_SUCCESS["create"], output[0])
@@ -2841,6 +3118,10 @@ class XdcrCLITest(CliBaseTest):
                 options += (" --xdcr-replicator={0}".format(replicator))
                 output, _ = self.__execute_cli(cli_command, options)
                 self.assertEqual(XdcrCLITest.XDCR_REPLICATE_SUCCESS["delete"], output[0])
+
+        # Remove rbac users in dest_nodes
+        role_del = ['cbadminbucket']
+        RbacBase().remove_user_role(role_del, RestConnection(self.dest_nodes[0]))
 
     def testSSLManage(self):
         '''ssl-manage OPTIONS:

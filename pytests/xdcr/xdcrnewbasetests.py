@@ -1,28 +1,30 @@
+import unittest
+import time
 import copy
+import logger
 import logging
 import re
-import time
-import unittest
 
-import logger
-from TestInput import TestInputSingleton
 from couchbase_helper.cluster import Cluster
-from couchbase_helper.document import View
-from couchbase_helper.documentgenerator import BlobGenerator, DocumentGenerator
-from couchbase_helper.stats_tools import StatsCommon
-from lib.membase.api.exception import XDCRException
-from membase.api.exception import ServerUnavailableException
 from membase.api.rest_client import RestConnection, Bucket
-from membase.helper.bucket_helper import BucketOperationHelper
-from membase.helper.cluster_helper import ClusterOperationHelper
-from memcached.helper.data_helper import MemcachedClientHelper
+from membase.api.exception import ServerUnavailableException
 from remote.remote_util import RemoteMachineShellConnection
 from remote.remote_util import RemoteUtilHelper
-from scripts import collect_data_files
+from testconstants import STANDARD_BUCKET_PORT
+from couchbase_helper.document import View
+from membase.helper.cluster_helper import ClusterOperationHelper
+from couchbase_helper.stats_tools import StatsCommon
+from membase.helper.bucket_helper import BucketOperationHelper
+from memcached.helper.data_helper import MemcachedClientHelper
+from TestInput import TestInputSingleton
 from scripts.collect_server_info import cbcollectRunner
+from scripts import collect_data_files
+from tasks.future import TimeoutError
+
+from couchbase_helper.documentgenerator import BlobGenerator, DocumentGenerator
+from lib.membase.api.exception import XDCRException
 from security.auditmain import audit
 from security.rbac_base import RbacBase
-from testconstants import STANDARD_BUCKET_PORT
 
 
 class RenameNodeException(XDCRException):
@@ -397,15 +399,27 @@ class NodeHelper:
                      + '/goxdcr.log*'
 
         shell = RemoteMachineShellConnection(server)
-        matches = []
-        if print_matches:
-            matches, err = shell.execute_command("zgrep \"{0}\" {1}".
-                                        format(str, goxdcr_log))
-            if matches:
-                NodeHelper._log.info(matches)
+        info = shell.extract_remote_info().type.lower()
+        if info == "windows":
+            matches = []
+            if print_matches:
+                matches, err = shell.execute_command("grep \"{0}\" {1}".
+                                            format(str, goxdcr_log))
+                if matches:
+                    NodeHelper._log.info(matches)
 
-        count, err = shell.execute_command("zgrep \"{0}\" {1} | wc -l".
-                                        format(str, goxdcr_log))
+            count, err = shell.execute_command("grep \"{0}\" {1} | wc -l".
+                                            format(str, goxdcr_log))
+        else:
+            matches = []
+            if print_matches:
+                matches, err = shell.execute_command("zgrep \"{0}\" {1}".
+                                                     format(str, goxdcr_log))
+                if matches:
+                    NodeHelper._log.info(matches)
+
+            count, err = shell.execute_command("zgrep \"{0}\" {1} | wc -l".
+                                               format(str, goxdcr_log))
         if isinstance(count, list):
             count = int(count[0])
         else:
@@ -547,6 +561,9 @@ class XDCRRemoteClusterRef:
         return "{0} -> {1}, Name: {2}".format(
             self.__src_cluster.get_name(), self.__dest_cluster.get_name(),
             self.__name)
+
+    def get_cb_clusters(self):
+        return self.__cb_clusters
 
     def get_src_cluster(self):
         return self.__src_cluster
@@ -848,6 +865,9 @@ class XDCReplication:
             toBucket=self.__to_bucket,
             xdcr_params=self.__convert_test_to_xdcr_params())
         self.__validate_start_audit_event()
+        #if within this 10s for pipeline updater if we try to create another replication, it doesn't work until the previous pipeline is updated.
+        # but better to have this 10s sleep between replications.
+        time.sleep(10)
 
     def __verify_pause(self):
         """Verify if replication is paused"""
@@ -1045,7 +1065,6 @@ class CouchbaseCluster:
     def get_cluster(self):
         return self.__clusterop
 
-
     def get_kv_gen(self):
         raise_if(
             self.__kv_gen is None,
@@ -1192,21 +1211,23 @@ class CouchbaseCluster:
     def create_sasl_buckets(
             self, bucket_size, num_buckets=1, num_replicas=1,
             eviction_policy=EVICTION_POLICY.VALUE_ONLY,
-            bucket_priority=BUCKET_PRIORITY.HIGH):
+            bucket_priority=BUCKET_PRIORITY.HIGH, lww=False):
         """Create sasl buckets.
         @param bucket_size: size of the bucket.
         @param num_buckets: number of buckets to create.
         @param num_replicas: number of replicas (1-3).
         @param eviction_policy: valueOnly etc.
         @param bucket_priority: high/low etc.
+        @param lww: conflict_resolution_type.
         """
         bucket_tasks = []
         for i in range(num_buckets):
             name = "sasl_bucket_" + str(i + 1)
             sasl_params = self._create_bucket_params(server=self.__master_node, password='password',
-                                                                size=bucket_size, replicas=num_replicas,
-                                                                eviction_policy=eviction_policy,
-                                                                bucket_priority=bucket_priority)
+                                                     size=bucket_size, replicas=num_replicas,
+                                                     eviction_policy=eviction_policy,
+                                                     bucket_priority=bucket_priority,
+                                                     lww=lww)
             bucket_tasks.append(self.__clusterop.async_create_sasl_bucket(name=name,password='password',
                                                                           bucket_params=sasl_params))
 
@@ -1215,7 +1236,8 @@ class CouchbaseCluster:
                     name=name, authType="sasl", saslPassword="password",
                     num_replicas=num_replicas, bucket_size=bucket_size,
                     eviction_policy=eviction_policy,
-                    bucket_priority=bucket_priority
+                    bucket_priority=bucket_priority,
+                    lww=lww
                 ))
 
         for task in bucket_tasks:
@@ -1224,13 +1246,14 @@ class CouchbaseCluster:
     def create_standard_buckets(
             self, bucket_size, num_buckets=1, num_replicas=1,
             eviction_policy=EVICTION_POLICY.VALUE_ONLY,
-            bucket_priority=BUCKET_PRIORITY.HIGH):
+            bucket_priority=BUCKET_PRIORITY.HIGH, lww=False):
         """Create standard buckets.
         @param bucket_size: size of the bucket.
         @param num_buckets: number of buckets to create.
         @param num_replicas: number of replicas (1-3).
         @param eviction_policy: valueOnly etc.
         @param bucket_priority: high/low etc.
+        @param lww: conflict_resolution_type.
         """
         bucket_tasks = []
         for i in range(num_buckets):
@@ -1240,7 +1263,8 @@ class CouchbaseCluster:
                 size=bucket_size,
                 replicas=num_replicas,
                 eviction_policy=eviction_policy,
-                bucket_priority=bucket_priority)
+                bucket_priority=bucket_priority,
+                lww=lww)
 
             bucket_tasks.append(self.__clusterop.async_create_standard_bucket(name=name, port=STANDARD_BUCKET_PORT+i,
                                                                               bucket_params=standard_params))
@@ -1255,7 +1279,8 @@ class CouchbaseCluster:
                     bucket_size=bucket_size,
                     port=STANDARD_BUCKET_PORT + i,
                     eviction_policy=eviction_policy,
-                    bucket_priority=bucket_priority
+                    bucket_priority=bucket_priority,
+                    lww=lww
                 ))
 
         for task in bucket_tasks:
@@ -1264,20 +1289,22 @@ class CouchbaseCluster:
     def create_default_bucket(
             self, bucket_size, num_replicas=1,
             eviction_policy=EVICTION_POLICY.VALUE_ONLY,
-            bucket_priority=BUCKET_PRIORITY.HIGH
+            bucket_priority=BUCKET_PRIORITY.HIGH, lww=False
     ):
         """Create default bucket.
         @param bucket_size: size of the bucket.
         @param num_replicas: number of replicas (1-3).
         @param eviction_policy: valueOnly etc.
         @param bucket_priority: high/low etc.
+        @param lww: conflict_resolution_type.
         """
         bucket_params=self._create_bucket_params(
             server=self.__master_node,
             size=bucket_size,
             replicas=num_replicas,
             eviction_policy=eviction_policy,
-            bucket_priority=bucket_priority
+            bucket_priority=bucket_priority,
+            lww=lww
         )
         self.__clusterop.create_default_bucket(bucket_params)
         self.__buckets.append(
@@ -1288,7 +1315,8 @@ class CouchbaseCluster:
                 num_replicas=num_replicas,
                 bucket_size=bucket_size,
                 eviction_policy=eviction_policy,
-                bucket_priority=bucket_priority
+                bucket_priority=bucket_priority,
+                lww=lww
             ))
 
     def get_buckets(self):
@@ -2194,7 +2222,7 @@ class CouchbaseCluster:
         for task in tasks:
             task.result(timeout)
 
-    def verify_items_count(self, timeout=300):
+    def verify_items_count(self, timeout=600):
         """Wait for actual bucket items count reach to the count on bucket kv_store.
         """
         active_key_count_passed = True
@@ -2211,7 +2239,14 @@ class CouchbaseCluster:
             while True:
                 try:
                     active_keys = int(rest.get_active_key_count(bucket.name))
-                    if active_keys != items:
+                except Exception as e:
+                    self.__log.error(e)
+                    bucket_info = rest.get_bucket_json(bucket.name)
+                    nodes = bucket_info["nodes"]
+                    active_keys = 0
+                    for node in nodes:
+                        active_keys += node["interestingStats"]["curr_items"]
+                if active_keys != items:
                         self.__log.warn("Not Ready: vb_active_curr_items %s == "
                                 "%s expected on %s, %s bucket"
                                  % (active_keys, items, self.__name, bucket.name))
@@ -2222,14 +2257,11 @@ class CouchbaseCluster:
                             active_key_count_passed = False
                             break
                         continue
-                    else:
-                        self.__log.info("Saw: vb_active_curr_items %s == "
-                                "%s expected on %s, %s bucket"
-                                % (active_keys, items, self.__name, bucket.name))
-                        break
-                except Exception as e:
-                    self.__log.error(e)
-
+                else:
+                    self.__log.info("Saw: vb_active_curr_items %s == "
+                            "%s expected on %s, %s bucket"
+                            % (active_keys, items, self.__name, bucket.name))
+                    break
         # check replica count
         curr_time = time.time()
         end_time = curr_time + timeout
@@ -2244,25 +2276,30 @@ class CouchbaseCluster:
             while True:
                 try:
                     replica_keys = int(rest.get_replica_key_count(bucket.name))
-                    if replica_keys != items:
-                        self.__log.warn("Not Ready: vb_replica_curr_items %s == "
-                                "%s expected on %s, %s bucket"
-                                 % (replica_keys, items ,self.__name, bucket.name))
-                        time.sleep(3)
-                        if time.time() > end_time:
-                            self.__log.error(
-                            "ERROR: Timed-out waiting for replica item count to match")
-                            replica_key_count_passed = False
-                            self.run_cbvdiff()
-                            break
-                        continue
-                    else:
-                        self.__log.info("Saw: vb_replica_curr_items %s == "
-                                "%s expected on %s, %s bucket"
-                                % (replica_keys, items, self.__name, bucket.name))
-                        break
                 except Exception as e:
                     self.__log.error(e)
+                    bucket_info = rest.get_bucket_json(bucket.name)
+                    nodes = bucket_info["nodes"]
+                    replica_keys = 0
+                    for node in nodes:
+                        replica_keys += node["interestingStats"]["vb_replica_curr_items"]
+                if replica_keys != items:
+                    self.__log.warn("Not Ready: vb_replica_curr_items %s == "
+                            "%s expected on %s, %s bucket"
+                             % (replica_keys, items ,self.__name, bucket.name))
+                    time.sleep(3)
+                    if time.time() > end_time:
+                        self.__log.error(
+                        "ERROR: Timed-out waiting for replica item count to match")
+                        replica_key_count_passed = False
+                        self.run_cbvdiff()
+                        break
+                    continue
+                else:
+                    self.__log.info("Saw: vb_replica_curr_items %s == "
+                            "%s expected on %s, %s bucket"
+                            % (replica_keys, items, self.__name, bucket.name))
+                    break
         return active_key_count_passed, replica_key_count_passed
 
     def run_cbvdiff(self):
@@ -2501,7 +2538,7 @@ class XDCRNewBaseTest(unittest.TestCase):
                 "====  XDCRNewbasetests cleanup is started for test #{0} {1} ===="
                 .format(self.__case_number, self._testMethodName))
             for cb_cluster in self.__cb_clusters:
-                cb_cluster.cleanup_cluster(self)
+                cb_cluster.cleanup_cluster(self,from_rest=True)
             self.log.info(
                 "====  XDCRNewbasetests cleanup is finished for test #{0} {1} ==="
                 .format(self.__case_number, self._testMethodName))
@@ -2581,15 +2618,11 @@ class XDCRNewBaseTest(unittest.TestCase):
         self.__topology = self._input.param("ctopology", TOPOLOGY.CHAIN)
         # complex topology tests (> 2 clusters must specify chain_length >2)
         self.__chain_length = self._input.param("chain_length", 2)
-        self.__rep_type = self._input.param(
-            "replication_type",
-            REPLICATION_PROTOCOL.XMEM)
+        self.__rep_type = self._input.param("replication_type",REPLICATION_PROTOCOL.XMEM)
         self.__num_sasl_buckets = self._input.param("sasl_buckets", 0)
         self.__num_stand_buckets = self._input.param("standard_buckets", 0)
 
-        self.__eviction_policy = self._input.param(
-            "eviction_policy",
-            'valueOnly')
+        self.__eviction_policy = self._input.param("eviction_policy",'valueOnly')
         self.__mixed_priority = self._input.param("mixed_priority", None)
 
         self.__lww = self._input.param("lww", 0)
@@ -2615,9 +2648,7 @@ class XDCRNewBaseTest(unittest.TestCase):
             "demand_encryption",
             False)
         self._num_replicas = self._input.param("replicas", 1)
-        self._create_default_bucket = self._input.param(
-            "default_bucket",
-            True)
+        self._create_default_bucket = self._input.param("default_bucket",True)
         self._rdirection = self._input.param("rdirection",
                             REPLICATION_DIRECTION.UNIDIRECTION)
         self._num_items = self._input.param("items", 1000)
@@ -2632,16 +2663,12 @@ class XDCRNewBaseTest(unittest.TestCase):
         if self._del_clusters:
             self._del_clusters = self._del_clusters.split('-')
         self._expires = self._input.param("expires", 0)
-        self._wait_for_expiration = self._input.param(
-            "wait_for_expiration",
-            True)
+        self._wait_for_expiration = self._input.param("wait_for_expiration",True)
         self._warmup = self._input.param("warm", "").split('-')
         self._rebalance = self._input.param("rebalance", "").split('-')
         self._failover = self._input.param("failover", "").split('-')
         self._wait_timeout = self._input.param("timeout", 60)
-        self._disable_compaction = self._input.param(
-            "disable_compaction",
-            "").split('-')
+        self._disable_compaction = self._input.param("disable_compaction","").split('-')
         self._item_count_timeout = self._input.param("item_count_timeout", 300)
         self._checkpoint_interval = self._input.param("checkpoint_interval",60)
         self._optimistic_threshold = self._input.param("optimistic_threshold", 256)
@@ -2720,6 +2747,35 @@ class XDCRNewBaseTest(unittest.TestCase):
             else:
                 FloatingServers._serverlist.append(server)
 
+    def get_cluster_op(self):
+        return self.__cluster_op
+
+    def add_built_in_server_user(self, testuser=None, rolelist=None, node=None):
+        """
+           From spock, couchbase server is built with some users that handles
+           some specific task such as:
+               cbadminbucket
+           Default added user is cbadminbucket with admin role
+        """
+        if testuser is None:
+            testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket',
+                                                'password': 'password'}]
+        if rolelist is None:
+            rolelist = [{'id': 'cbadminbucket', 'name': 'cbadminbucket',
+                                                      'roles': 'admin'}]
+        if node is None:
+            node = self.master
+
+        self.log.info("**** add built-in '%s' user to node %s ****" % (testuser[0]["name"],
+                                                                       node.ip))
+        RbacBase().create_user_source(testuser, 'builtin', node)
+        self.sleep(10)
+
+        self.log.info("**** add '%s' role to '%s' user ****" % (rolelist[0]["roles"],
+                                                                testuser[0]["name"]))
+        RbacBase().add_user_role(rolelist, RestConnection(node), 'builtin')
+        self.sleep(10)
+
     def get_cb_cluster_by_name(self, name):
         """Return couchbase cluster object for given name.
         @return: CouchbaseCluster object
@@ -2737,6 +2793,11 @@ class XDCRNewBaseTest(unittest.TestCase):
     def get_cb_clusters(self):
         return self.__cb_clusters
 
+    def get_lww(self):
+        return self.__lww
+
+    def get_report_error_list(self):
+        return self.__report_error_list
 
     def __calculate_bucket_size(self, cluster_quota, num_buckets):
 
@@ -2755,8 +2816,6 @@ class XDCRNewBaseTest(unittest.TestCase):
         elif num_buckets > 0:
             bucket_size = int((float(cluster_quota) - 500)/float(num_buckets))
         return bucket_size
-
-
 
     def __create_buckets(self):
         # if mixed priority is set by user, set high priority for sasl and
@@ -2779,19 +2838,20 @@ class XDCRNewBaseTest(unittest.TestCase):
                     bucket_size,
                     self._num_replicas,
                     eviction_policy=self.__eviction_policy,
-                    bucket_priority=bucket_priority)
+                    bucket_priority=bucket_priority,
+                    lww=self.__lww)
 
             cb_cluster.create_sasl_buckets(
                 bucket_size, num_buckets=self.__num_sasl_buckets,
                 num_replicas=self._num_replicas,
                 eviction_policy=self.__eviction_policy,
-                bucket_priority=bucket_priority)
+                bucket_priority=bucket_priority, lww=self.__lww)
 
             cb_cluster.create_standard_buckets(
                 bucket_size, num_buckets=self.__num_stand_buckets,
                 num_replicas=self._num_replicas,
                 eviction_policy=self.__eviction_policy,
-                bucket_priority=bucket_priority)
+                bucket_priority=bucket_priority, lww=self.__lww)
 
     def create_buckets_on_cluster(self, cluster_name):
         # if mixed priority is set by user, set high priority for sasl and
@@ -3327,7 +3387,7 @@ class XDCRNewBaseTest(unittest.TestCase):
             self.fail("Replication restarted on one of the nodes, scroll above"
                       "for reason")
 
-    def _wait_for_replication_to_catchup(self, timeout=300):
+    def _wait_for_replication_to_catchup(self, timeout=300, fetch_bucket_stats_by="minute"):
 
         _count1 = _count2 = 0
         for cb_cluster in self.__cb_clusters:
@@ -3342,8 +3402,23 @@ class XDCRNewBaseTest(unittest.TestCase):
                 rest2 = RestConnection(remote_cluster.get_dest_cluster().get_master_node())
                 for bucket in cb_cluster.get_buckets():
                     while time.time() < end_time :
-                        _count1 = rest1.fetch_bucket_stats(bucket=bucket.name)["op"]["samples"]["curr_items"][-1]
-                        _count2 = rest2.fetch_bucket_stats(bucket=bucket.name)["op"]["samples"]["curr_items"][-1]
+                        try:
+                            _count1 = rest1.fetch_bucket_stats(bucket=bucket.name,zoom=fetch_bucket_stats_by)["op"]["samples"]["curr_items"][-1]
+                            _count2 = rest2.fetch_bucket_stats(bucket=bucket.name,zoom=fetch_bucket_stats_by)["op"]["samples"]["curr_items"][-1]
+                        except Exception as e:
+                            self.log.warn(e)
+                            self.log.info("Trying other method to fetch bucket current items")
+                            bucket_info1 = rest1.get_bucket_json(bucket.name)
+                            nodes = bucket_info1["nodes"]
+                            _count1 = 0
+                            for node in nodes:
+                                _count1 += node["interestingStats"]["curr_items"]
+                            
+                            bucket_info2 = rest2.get_bucket_json(bucket.name)
+                            nodes = bucket_info1["nodes"]
+                            _count2 = 0
+                            for node in nodes:
+                                _count2 += node["interestingStats"]["curr_items"]
                         if _count1 == _count2:
                             self.log.info("Replication caught up for bucket {0}: {1}".format(bucket.name, _count1))
                             break
@@ -3465,3 +3540,23 @@ class XDCRNewBaseTest(unittest.TestCase):
             error_logger = self.check_errors_in_goxdcr_logs()
             if error_logger:
                 self.fail("Errors found in logs : {0}".format(error_logger))
+                
+    def wait_service_started(self, server, wait_time=120):
+        shell = RemoteMachineShellConnection(server)
+        type = shell.extract_remote_info().distribution_type
+        if type.lower() == 'windows':
+            cmd = "sc query CouchbaseServer | grep STATE"
+        else:
+            cmd = "service couchbase-server status"
+        now = time.time()
+        while time.time() - now < wait_time:
+            output, error = shell.execute_command(cmd)
+            if str(output).lower().find("running") != -1:
+                self.log.info("Couchbase service is running")
+                shell.disconnect()
+                return
+            else:
+                self.log.warn("couchbase service is not running. {0}".format(output))
+                self.sleep(10)
+        shell.disconnect()
+        self.fail("Couchbase service is not running after {0} seconds".format(wait_time))

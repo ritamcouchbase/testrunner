@@ -1,20 +1,18 @@
 import time
-
 from basetestcase import BaseTestCase
-from couchbase_helper.documentgenerator import BlobGenerator
-from membase.api.exception import BucketCreationException
-from membase.api.rest_client import RestConnection, Bucket, RestHelper
-from membase.helper.bucket_helper import BucketOperationHelper
 from remote.remote_util import RemoteMachineShellConnection
-from scripts.install import InstallerJob
-from testconstants import COUCHBASE_FROM_WATSON, COUCHBASE_FROM_4DOT6,\
-                          COUCHBASE_FROM_SPOCK
+from membase.api.rest_client import RestConnection, Bucket, RestHelper
+from membase.api.exception import BucketCreationException
+from membase.helper.bucket_helper import BucketOperationHelper
+from couchbase_helper.documentgenerator import BlobGenerator
+from testconstants import STANDARD_BUCKET_PORT
 from testconstants import LINUX_COUCHBASE_BIN_PATH
 from testconstants import LINUX_COUCHBASE_SAMPLE_PATH
-from testconstants import STANDARD_BUCKET_PORT
 from testconstants import WIN_COUCHBASE_BIN_PATH
 from testconstants import WIN_COUCHBASE_SAMPLE_PATH
-
+from testconstants import COUCHBASE_FROM_WATSON, COUCHBASE_FROM_4DOT6,\
+                          COUCHBASE_FROM_SPOCK
+from scripts.install import InstallerJob
 
 class CreateBucketTests(BaseTestCase):
     def setUp(self):
@@ -151,6 +149,7 @@ class CreateBucketTests(BaseTestCase):
         except Exception, e:
             if e:
                 print e
+        self.sleep(10)
         self.log.info("Add new user after reset node! ")
         self.add_built_in_server_user(node=self.master)
         if status:
@@ -220,8 +219,6 @@ class CreateBucketTests(BaseTestCase):
             use rest to reset node to set services correctly: index,kv,n1ql """
         self.rest.force_eject_node()
 
-        self.log.info("Add new user after reset node! ")
-        self.add_built_in_server_user(node=self.master)
         shell = RemoteMachineShellConnection(self.master)
         set_index_storage_type = ""
         if self.node_version[:5] in COUCHBASE_FROM_WATSON:
@@ -236,6 +233,8 @@ class CreateBucketTests(BaseTestCase):
         else:
             self.assertEqual(o[0], "SUCCESS: init/edit localhost")
 
+        self.log.info("Add new user after reset node! ")
+        self.add_built_in_server_user(node=self.master)
         shell = RemoteMachineShellConnection(self.master)
         cluster_flag = "-n"
         bucket_quota_flag = "-s"

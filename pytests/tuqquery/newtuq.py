@@ -1,19 +1,25 @@
-import copy
-import json
 import logging
-import os
-import re
 import threading
-import time
+import logger
+import json
+import uuid
+import copy
+import math
+import re
+import os
 
 import testconstants
-from basetestcase import BaseTestCase
-from couchbase_helper.tuq_generators import JsonGenerator
+import datetime
+import time
+from datetime import date
 from couchbase_helper.tuq_generators import TuqGenerators
-from membase.api.exception import CBQError
-from membase.api.rest_client import RestConnection
+from couchbase_helper.tuq_generators import JsonGenerator
 from remote.remote_util import RemoteMachineShellConnection
-
+from basetestcase import BaseTestCase
+from couchbase_helper.documentgenerator import DocumentGenerator
+from membase.api.exception import CBQError, ReadDocumentException
+from membase.api.rest_client import RestConnection
+from memcached.helper.data_helper import MemcachedClientHelper
 
 class QueryTests(BaseTestCase):
     def setUp(self):
@@ -43,7 +49,6 @@ class QueryTests(BaseTestCase):
         self.named_prepare = self.input.param("named_prepare", None)
         self.skip_primary_index = self.input.param("skip_primary_index",False)
         self.scan_consistency = self.input.param("scan_consistency", 'REQUEST_PLUS')
-        self.cbas_node = self.input.cbas
         shell = RemoteMachineShellConnection(self.master)
         type = shell.extract_remote_info().distribution_type
         self.path = testconstants.LINUX_COUCHBASE_BIN_PATH
@@ -53,15 +58,19 @@ class QueryTests(BaseTestCase):
             self.path = testconstants.MAC_COUCHBASE_BIN_PATH
         self.threadFailure = False
         if self.primary_indx_type.lower() == "gsi":
-            self.gsi_type = self.input.param("gsi_type", None)
+            self.gsi_type = self.input.param("gsi_type", 'plasma')
         else:
             self.gsi_type = None
         if self.input.param("reload_data", False):
+            if self.analytics:
+                self.cluster.rebalance([self.master, self.cbas_node], [], [self.cbas_node], services=['cbas'])
             for bucket in self.buckets:
                 self.cluster.bucket_flush(self.master, bucket=bucket,
                                           timeout=self.wait_timeout * 5)
             self.gens_load = self.generate_docs(self.docs_per_day)
             self.load(self.gens_load, flag=self.item_flag)
+            if self.analytics:
+                self.cluster.rebalance([self.master, self.cbas_node], [self.cbas_node], [], services=['cbas'])
         self.gens_load = self.generate_docs(self.docs_per_day)
         if self.input.param("gomaxprocs", None):
             self.configure_gomaxprocs()
@@ -78,6 +87,10 @@ class QueryTests(BaseTestCase):
             if not self.input.param("skip_build_tuq", True):
                 self._build_tuq(self.master)
             self.skip_buckets_handle = True
+            if (self.analytics):
+                self.cluster.rebalance([self.master, self.cbas_node], [self.cbas_node], [], services=['cbas'])
+                self.setup_analytics()
+                self.sleep(30,'wait for analytics setup')
         except:
             self.log.error('SUITE SETUP FAILED')
             self.tearDown()
@@ -86,6 +99,8 @@ class QueryTests(BaseTestCase):
         if self._testMethodName == 'suite_tearDown':
             self.skip_buckets_handle = False
         if self.analytics:
+            bucket_username = "cbadminbucket"
+            bucket_password = "password"
             data = 'use Default ;'
             for bucket in self.buckets:
                 data += 'disconnect bucket {0} if connected;'.format(bucket.name)
@@ -96,7 +111,7 @@ class QueryTests(BaseTestCase):
             f.write(data)
             f.close()
             url = 'http://{0}:8095/analytics/service'.format(self.cbas_node.ip)
-            cmd = 'curl -s --data pretty=true --data-urlencode "statement@file.txt" ' + url
+            cmd = 'curl -s --data pretty=true --data-urlencode "statement@file.txt" ' + url + " -u " + bucket_username + ":" + bucket_password
             os.system(cmd)
             os.remove(filename)
         super(QueryTests, self).tearDown()
@@ -123,9 +138,9 @@ class QueryTests(BaseTestCase):
         # os.system(cmd)
         # os.remove(filename)
         data = 'use Default;'
+        bucket_username = "cbadminbucket"
+        bucket_password = "password"
         for bucket in self.buckets:
-            bucket_username = "cbadminbucket"
-            bucket_password = "password"
             data += 'create bucket {0} with {{"bucket":"{0}","nodes":"{1}"}} ;'.format(
                 bucket.name, self.master.ip)
             data += 'create shadow dataset {1} on {0}; '.format(bucket.name,
@@ -137,7 +152,7 @@ class QueryTests(BaseTestCase):
         f.write(data)
         f.close()
         url = 'http://{0}:8095/analytics/service'.format(self.cbas_node.ip)
-        cmd = 'curl -s --data pretty=true --data-urlencode "statement@file.txt" ' + url
+        cmd = 'curl -s --data pretty=true --data-urlencode "statement@file.txt" ' + url + " -u " + bucket_username + ":" + bucket_password
         os.system(cmd)
         os.remove(filename)
 
@@ -148,7 +163,6 @@ class QueryTests(BaseTestCase):
             logging.debug('event set: %s', event_is_set)
             if event_is_set:
                 result = self.run_cbq_query("select * from system:active_requests")
-                print result
                 self.assertTrue(result['metrics']['resultCount'] == 1)
                 requestId = result['requestID']
                 result = self.run_cbq_query(
@@ -158,14 +172,12 @@ class QueryTests(BaseTestCase):
                     'select * from system:active_requests  where requestId  =  "%s"' % requestId)
                 self.assertTrue(result['metrics']['resultCount'] == 0)
                 result = self.run_cbq_query("select * from system:completed_requests")
-                print result
                 requestId = result['requestID']
                 result = self.run_cbq_query(
                     'delete from system:completed_requests where requestId  =  "%s"' % requestId)
                 time.sleep(10)
                 result = self.run_cbq_query(
                     'select * from system:completed_requests where requestId  =  "%s"' % requestId)
-                print result
                 self.assertTrue(result['metrics']['resultCount'] == 0)
 
 ##############################################################################################
@@ -397,8 +409,6 @@ class QueryTests(BaseTestCase):
             query_template = 'SELECT $obj0.$_obj0_int0 AS points FROM %s AS test ' %(bucket.name) +\
                          'GROUP BY $obj0.$_obj0_int0 ORDER BY points'
             actual_result, expected_result = self.run_query_from_template(query_template)
-            print "actual results are {0}".format(actual_result['results'])
-            print "expected results are {0}".format(expected_result)
             self._verify_results(actual_result['results'], expected_result)
 
     def test_alias_order_desc(self):
@@ -490,8 +500,6 @@ class QueryTests(BaseTestCase):
                                                                             bucket.name) +\
             ' WHERE $int1 >7 GROUP BY $int0, $int1 ORDER BY emp_per_month, $int1, $int0'  
             actual_result, expected_result = self.run_query_from_template(query_template)
-            print "Expected result is {0}".format(expected_result)
-            print "Actual result is {0}".format(actual_result)
             #self.assertTrue(len(actual_result['results'])== 0)
 
     def test_order_by_aggr_fn(self):
@@ -688,7 +696,7 @@ class QueryTests(BaseTestCase):
                 query = query + ";"
                 for bucket in self.buckets:
                     query = query.replace(bucket.name,bucket.name+"_shadow")
-                result = rest.execute_statement_on_cbas(query, "immediate")
+                result = RestConnection(self.cbas_node).execute_statement_on_cbas(query, "immediate")
                 result = json.loads(result)
 
             else :
@@ -794,7 +802,6 @@ class QueryTests(BaseTestCase):
                 couchbase_path = testconstants.WIN_COUCHBASE_BIN_PATH
             if self.input.tuq_client and "sherlock_path" in self.input.tuq_client:
                 couchbase_path = "%s/bin" % self.input.tuq_client["sherlock_path"]
-                print "PATH TO SHERLOCK: %s" % couchbase_path
             if os == 'windows':
                 cmd = "cd %s; " % (couchbase_path) +\
                 "./cbq-engine.exe -datastore http://%s:%s/ >/dev/null 2>&1 &" %(
@@ -923,7 +930,6 @@ class QueryTests(BaseTestCase):
                 self.query = 'select * from system:indexes where name="#primary" and keyspace_id = "%s"' % bucket.name
                 res = self.run_cbq_query()
                 self.sleep(10)
-                #print res
                 if self.monitoring:
                     self.query = "delete from system:completed_requests"
                     self.run_cbq_query()
@@ -943,12 +949,11 @@ class QueryTests(BaseTestCase):
                 if self.monitoring:
                         self.query = "select * from system:active_requests"
                         result = self.run_cbq_query()
-                        #print result
+
                         self.assertTrue(result['metrics']['resultCount'] == 1)
                         self.query = "select * from system:completed_requests"
                         time.sleep(20)
-                        result = self.run_cbq_query()
-                        #print result
+                        self.run_cbq_query()
 
 
 

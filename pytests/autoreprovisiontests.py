@@ -3,13 +3,14 @@ import time
 import unittest
 
 import logger
-from TestInput import TestInputSingleton
 from membase.api.exception import RebalanceFailedException
 from membase.api.rest_client import RestConnection, RestHelper
 from membase.helper.bucket_helper import BucketOperationHelper
 from membase.helper.cluster_helper import ClusterOperationHelper
 from memcached.helper.data_helper import MemcachedClientHelper
 from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
+
+from TestInput import TestInputSingleton
 from security.rbac_base import RbacBase
 
 log = logger.Logger.get_logger()
