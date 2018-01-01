@@ -2,22 +2,22 @@ import copy
 import json
 import os
 import random
-import string, re
+import re
+import string
 import time
 from threading import Thread
 
 from TestInput import TestInputSingleton
 from clitest.cli_base import CliBaseTest
 from couchbase_cli import CouchbaseCLI
-from upgrade.newupgradebasetest import NewUpgradeBaseTest
-from security.rbacmain import rbacmain
-from security.rbac_base import RbacBase
 from membase.api.rest_client import RestConnection
 from memcached.helper.data_helper import MemcachedClientHelper
 from remote.remote_util import RemoteMachineShellConnection
+from security.rbac_base import RbacBase
 from testconstants import CLI_COMMANDS, COUCHBASE_FROM_SPOCK, \
-                          COUCHBASE_FROM_WATSON, COUCHBASE_FROM_SHERLOCK,\
-                          COUCHBASE_FROM_4DOT6
+    COUCHBASE_FROM_WATSON, COUCHBASE_FROM_SHERLOCK, \
+    COUCHBASE_FROM_4DOT6
+from upgrade.newupgradebasetest import NewUpgradeBaseTest
 
 help = {'CLUSTER': '--cluster=HOST[:PORT] or -c HOST[:PORT]',
  'COMMAND': {'bucket-compact': 'compact database and index data',
@@ -390,6 +390,48 @@ class CouchbaseCliTest(CliBaseTest, NewUpgradeBaseTest):
                   cluster_host="localhost", user="Administrator", password="password")
         self.assertEqual([], output)
         remote_client.disconnect()
+
+    def test_priority_start_couchbase_saslauth(self):
+        """
+            In centos 6.x, couchbase server needs to start after saslauth start
+            so the authentication works correctly as mention in ticket MB-25922
+            This test requires saslauth preinstalled on vm.
+        """
+        if "centos 7" in self.os_version:
+            self.log.info("This test only for centos 6.x")
+            return
+        if "windows" in self.os_version:
+            self.log.info("This test is for centos 6.x only, not for windows")
+            return
+        if "centos" in self.os_version:
+            """ If saslauth did not install on vm, mark test as failed. """
+            output, error = self.shell.execute_command("/etc/init.d/saslauthd status")
+            if output and "is running" not in output[0]:
+                self.fail("Need a centos 6.x with saslauth preinstalled.")
+
+            self.shell.execute_command("reboot")
+            self.sleep(240, "sleep while rebooting")
+            shell = RemoteMachineShellConnection(self.master)
+            shell.disable_firewall()
+            output, error = shell.execute_command('find /etc/rc3.d/ '\
+                                                  '| egrep "saslauthd|couchbase"')
+            if output:
+                self.log.info("Order starting: %s " % output)
+                if "saslauthd" in output[0] and "couchbase-serve" in output[1]:
+                    self.log.info("Couchbase Server started after saslauthd")
+                elif "couchbase-server" in output[0]:
+                    self.fail("Couchbase Server started before saslauthd")
+            output, error = shell.execute_command('cat /var/log/boot.log '\
+                                                  '| egrep "saslauthd|couchbase"')
+            if output:
+                self.log.info("Order starting: %s " % output)
+                if "Starting saslauth" in output[0] and "couchbase-server" in output[-1]:
+                    self.log.info("Couchbase Server started after saslauthd")
+                elif "couchbase-server" in output[0]:
+                    self.fail("Couchbase Server started before saslauthd")
+        else:
+            self.log.info("This test only for centos 6.x")
+            return
 
     def testAddRemoveNodes(self):
         nodes_add = self.input.param("nodes_add", 1)
@@ -2448,25 +2490,26 @@ class CouchbaseCliTest(CliBaseTest, NewUpgradeBaseTest):
         output, error = remote_client.execute_couchbase_cli(
             cli_command=cli_command, options=options, cluster_host="localhost",
             cluster_port=8091, user="Administrator", password="password")
-        self.assertEqual(output, ['No parameters specified'])
+        self.assertTrue(self._check_output('No parameters specified', output))
 
         options = '--blabla'
         output, error = remote_client.execute_couchbase_cli(
             cli_command=cli_command, options=options, cluster_host="localhost",
             cluster_port=8091, user="Administrator", password="password")
-        self.assertEqual(output, ['ERROR: option --blabla not recognized'])
+        self.assertTrue(self._check_output("unrecognized arguments:", output))
 
         options = '--new-password aaa'
         output, error = remote_client.execute_couchbase_cli(
             cli_command=cli_command, options=options, cluster_host="127.0.0.5",
             cluster_port=8091, user="Administrator", password="password")
-        self.assertEqual(output, ['API is accessible from localhost only'])
+        self.assertTrue(self._check_output("The password must be at least 6 characters long",
+                                           output))
 
         output, error = remote_client.execute_couchbase_cli(
             cli_command=cli_command, options=options, cluster_host="127.0.0.1",
             cluster_port=8091, user="Administrator", password="password")
-        self.assertEqual(output,
-                    ['{"errors":{"_":"The password must be at least 6 characters long."}}'])
+        self.assertTrue(self._check_output("The password must be at least 6 characters long",
+                                            output))
         try:
             options = '--regenerate'
             outputs = []
@@ -2474,7 +2517,10 @@ class CouchbaseCliTest(CliBaseTest, NewUpgradeBaseTest):
                 output, error = remote_client.execute_couchbase_cli(
                     cli_command=cli_command, options=options, cluster_host="127.0.0.1",
                     cluster_port=8091, user="FAKE", password="FAKE")
-                new_password = output[0]
+                new_password = ""
+                for x in output:
+                    if not x.startswith("DEPRECATED") and len(x) == 8:
+                        new_password = x
                 self.assertEqual(len(new_password), 8)
                 self.assertTrue(new_password not in outputs)
                 outputs.append(new_password)
@@ -2490,7 +2536,8 @@ class CouchbaseCliTest(CliBaseTest, NewUpgradeBaseTest):
                 output, _ = remote_client.execute_couchbase_cli(
                     cli_command=cli_command, options=options, cluster_host="127.0.0.1",
                     cluster_port=8091, user="Administrator", password="password")
-                self.assertEqual(output, ['SUCCESS: Administrator password changed'])
+                self.assertTrue(self._check_output('SUCCESS: Administrator password changed',
+                                                   output))
                 server.rest_password = old_password
                 rest = RestConnection(server)
                 server.rest_password = new_password
@@ -2507,7 +2554,10 @@ class CouchbaseCliTest(CliBaseTest, NewUpgradeBaseTest):
                 output, _ = remote_client.execute_couchbase_cli(
                     cli_command=cli_command, options=options, cluster_host="127.0.0.1",
                     cluster_port=8091, user="Administrator", password="password")
-                new_password = output[0]
+                new_password = ""
+                for x in output:
+                    if not x.startswith("DEPRECATED") and len(x) == 8:
+                        new_password = x
                 server.rest_password = old_password
                 rest = RestConnection(server)
 
@@ -2544,6 +2594,8 @@ class CouchbaseCliTest(CliBaseTest, NewUpgradeBaseTest):
         sub_command = self.input.param("sub-command", None)
         new_users = self.input.param("new-users", None)
         new_roles = self.input.param("new-roles", None)
+        if "star" in new_roles:
+            new_roles = new_roles.replace("star", "*")
         enabled = self.input.param("enabled", False)
         default = self.input.param("default", None)
         self.bucket_type = self.input.param("bucket-type", "couchbase")

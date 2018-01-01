@@ -3,18 +3,19 @@
 Python based SDK client interface
 
 """
-import crc32
+import json
 import time
-from couchbase import FMT_AUTO
-from memcached.helper.old_kvstore import ClientKeyValueStore
-from couchbase.bucket import Bucket as CouchbaseBucket
-from couchbase.cluster import Cluster, ClassicAuthenticator, PasswordAuthenticator
-from couchbase.exceptions import CouchbaseError, BucketNotFoundError
-from mc_bin_client import MemcachedError
-from couchbase.n1ql import N1QLQuery, N1QLRequest
 
 import couchbase
-import json
+from couchbase import FMT_AUTO
+from couchbase.bucket import Bucket as CouchbaseBucket
+from couchbase.cluster import Cluster, PasswordAuthenticator
+from couchbase.exceptions import CouchbaseError, BucketNotFoundError
+from couchbase.n1ql import N1QLQuery, N1QLRequest
+
+import crc32
+from mc_bin_client import MemcachedError
+from memcached.helper.old_kvstore import ClientKeyValueStore
 
 
 class SDKClient(object):
@@ -22,10 +23,10 @@ class SDKClient(object):
 
     def __init__(self, bucket, hosts = ["localhost"] , scheme = "couchbase",
                  ssl_path = None, uhm_options = None, password=None,
-                 quiet=True, certpath = None, transcoder = None):
+                 quiet=True, certpath = None, transcoder = None, ipv6=False):
         self.connection_string = \
             self._createString(scheme = scheme, bucket = bucket, hosts = hosts,
-                               certpath = certpath, uhm_options = uhm_options)
+                               certpath = certpath, uhm_options = uhm_options, ipv6=ipv6)
         self.bucket = bucket
         self.password = password
         self.quiet = quiet
@@ -34,12 +35,18 @@ class SDKClient(object):
         self._createConn()
         couchbase.set_json_converters(json.dumps, json.loads)
 
-    def _createString(self, scheme ="couchbase", bucket = None, hosts = ["localhost"], certpath = None, uhm_options = ""):
+    def _createString(self, scheme ="couchbase", bucket = None, hosts = ["localhost"], certpath = None,
+                      uhm_options = "", ipv6=False):
         connection_string = "{0}://{1}".format(scheme, ", ".join(hosts).replace(" ",""))
         # if bucket != None:
         #     connection_string = "{0}/{1}".format(connection_string, bucket)
         if uhm_options != None:
             connection_string = "{0}?{1}".format(connection_string, uhm_options)
+        if ipv6 == True:
+            if "?" in connection_string:
+                connection_string = "{0},ipv6=allow".format(connection_string)
+            else:
+                connection_string = "{0}?ipv6=allow".format(connection_string)
         if scheme == "couchbases":
             if "?" in connection_string:
                 connection_string = "{0},certpath={1}".format(connection_string, certpath)

@@ -1,24 +1,22 @@
-import random
-import time
 import json
+import random
+import subprocess
+import time
 
 import logger
 from basetestcase import BaseTestCase
+from couchbase_helper.cluster import Cluster
 from membase.api.rest_client import RestConnection
+from membase.helper.bucket_helper import BucketOperationHelper
+from membase.helper.cluster_helper import ClusterOperationHelper
 from remote.remote_util import RemoteMachineShellConnection
+from security.rbacmain import rbacmain
 from testconstants import LINUX_COUCHBASE_SAMPLE_PATH, \
     WIN_COUCHBASE_SAMPLE_PATH_C, \
     WIN_BACKUP_C_PATH, LINUX_BACKUP_PATH, LINUX_COUCHBASE_LOGS_PATH, \
     WIN_COUCHBASE_LOGS_PATH, WIN_TMP_PATH, WIN_TMP_PATH_RAW, \
-    WIN_BACKUP_PATH, LINUX_COUCHBASE_BIN_PATH, LINUX_ROOT_PATH, LINUX_CB_PATH,\
-    MAC_COUCHBASE_BIN_PATH, WIN_COUCHBASE_BIN_PATH, WIN_ROOT_PATH
-
-from couchbase_helper.cluster import Cluster
-from security.rbac_base import RbacBase
-from security.rbacmain import rbacmain
-from membase.helper.bucket_helper import BucketOperationHelper
-from membase.helper.cluster_helper import ClusterOperationHelper
-
+    WIN_BACKUP_PATH, LINUX_ROOT_PATH, LINUX_CB_PATH, \
+    WIN_ROOT_PATH
 
 log = logger.Logger.get_logger()
 
@@ -87,7 +85,13 @@ class CliBaseTest(BaseTestCase):
         self.full_v = None
         self.short_v = None
         self.build_number = None
-        self.cli_command_path = LINUX_COUCHBASE_BIN_PATH
+        cmd =  'curl %s:8091/diag/eval -u Administrator:password ' % self.master.ip
+        cmd += '-d "path_config:component_path(bin)."'
+        bin_path  = subprocess.check_output(cmd, shell=True)
+        if "bin" not in bin_path:
+            self.fail("Check if cb server install on %s" % self.master.ip)
+        else:
+            self.cli_command_path = bin_path.replace('"','') + "/"
         self.root_path = LINUX_ROOT_PATH
         self.tmp_path = "/tmp/"
         self.tmp_path_raw = "/tmp/"
@@ -101,8 +105,6 @@ class CliBaseTest(BaseTestCase):
         self.base_cb_path = LINUX_CB_PATH
         """ non root path """
         if self.nonroot:
-            self.cli_command_path = "/home/%s%s" % (self.master.ssh_username,
-                                                    LINUX_COUCHBASE_BIN_PATH)
             self.sample_files_path = "/home/%s%s" % (self.master.ssh_username,
                                                      LINUX_COUCHBASE_SAMPLE_PATH)
             self.log_path = "/home/%s%s" % (self.master.ssh_username,
@@ -118,12 +120,15 @@ class CliBaseTest(BaseTestCase):
             self.tmp_path_raw = WIN_TMP_PATH_RAW
             self.cmd_backup_path = WIN_BACKUP_C_PATH
             self.backup_path = WIN_BACKUP_PATH
-            self.cli_command_path = WIN_COUCHBASE_BIN_PATH
             self.sample_files_path = WIN_COUCHBASE_SAMPLE_PATH_C
             self.log_path = WIN_COUCHBASE_LOGS_PATH
+            win_format = "C:/Program Files"
+            cygwin_format = "/cygdrive/c/Program\ Files"
+            if win_format in self.cli_command_path:
+                self.cli_command_path = self.cli_command_path.replace(win_format,
+                                                                      cygwin_format)
         if info.distribution_type.lower() == 'mac':
             self.os = 'mac'
-            self.cli_command_path = MAC_COUCHBASE_BIN_PATH
         self.full_v, self.short_v, self.build_number = self.shell.get_cbversion(type)
         self.couchbase_usrname = "%s" % (self.input.membase_settings.rest_username)
         self.couchbase_password = "%s" % (self.input.membase_settings.rest_password)

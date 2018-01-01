@@ -1,24 +1,17 @@
+import ast
 import copy
-import json, filecmp, itertools
-import os, shutil, ast
-from threading import Thread
+import itertools
+import os
+import shutil
 
-from membase.api.rest_client import RestConnection
-from memcached.helper.data_helper import MemcachedClientHelper
-from TestInput import TestInputSingleton
 from clitest.cli_base import CliBaseTest
 from couchbase_helper.cluster import Cluster
-from remote.remote_util import RemoteMachineShellConnection
+from couchbase_helper.documentgenerator import BlobGenerator, JsonDocGenerator
+from membase.api.rest_client import RestConnection
 from membase.helper.bucket_helper import BucketOperationHelper
 from membase.helper.cluster_helper import ClusterOperationHelper
-from couchbase_helper.documentgenerator import BlobGenerator, JsonDocGenerator
-from couchbase_helper.data_analysis_helper import DataCollector
-from couchbase_cli import CouchbaseCLI
+from remote.remote_util import RemoteMachineShellConnection
 from security.rbac_base import RbacBase
-from pprint import pprint
-from testconstants import CLI_COMMANDS, COUCHBASE_FROM_WATSON,\
-                          COUCHBASE_FROM_SPOCK, LINUX_COUCHBASE_BIN_PATH,\
-                          WIN_COUCHBASE_BIN_PATH, COUCHBASE_FROM_SHERLOCK
 
 
 class ImportExportTests(CliBaseTest):
@@ -215,6 +208,10 @@ class ImportExportTests(CliBaseTest):
         """
         options = {"load_doc": True, "docs":"1000"}
         new_password = self.input.param("password", None)
+        if "hash" in new_password:
+            new_password = new_password.replace("hash", "#")
+        if "bang" in new_password:
+            new_password = new_password.replace("bang", "!")
         rest_password = self.master.rest_password
         command = "setting-cluster"
         password_changed = False
@@ -885,6 +882,14 @@ class ImportExportTests(CliBaseTest):
                 imp_rest.force_eject_node()
                 self.sleep(2)
 
+                imp_rest = RestConnection(import_servers[2])
+                status = False
+                info = imp_rest.get_nodes_self()
+                if info.memoryQuota and int(info.memoryQuota) > 0:
+                    self.quota = info.memoryQuota
+                imp_rest.init_node()
+                self.cluster.rebalance(import_servers[2:], [import_servers[3]], [])
+
                 """ Add built-in user cbadminbucket to second cluster """
                 self.log.info("add built-in user cbadminbucket to second cluster.")
                 testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket', 'password': 'password'}]
@@ -895,13 +900,6 @@ class ImportExportTests(CliBaseTest):
                 RbacBase().add_user_role(role_list, RestConnection(import_servers[2]), 'builtin')
                 self.sleep(10)
 
-                imp_rest = RestConnection(import_servers[2])
-                status = False
-                info = imp_rest.get_nodes_self()
-                if info.memoryQuota and int(info.memoryQuota) > 0:
-                    self.quota = info.memoryQuota
-                imp_rest.init_node()
-                self.cluster.rebalance(import_servers[2:], [import_servers[3]], [])
                 bucket_params=self._create_bucket_params(server=import_servers[2],
                                         size=250,
                                         replicas=self.num_replicas,
@@ -1182,9 +1180,12 @@ class ImportExportTests(CliBaseTest):
 
             if self.imex_type == "json":
                 self.log.info("Copy bucket data from remote to local")
+                if os.path.exists("/tmp/%s" % self.master.ip):
+                    shutil.rmtree("/tmp/%s" % self.master.ip)
+                os.makedirs("/tmp/%s" % self.master.ip)
                 self.shell.copy_file_remote_to_local(export_file,
-                                              "/tmp/bucket_data")
-                with open("/tmp/bucket_data") as f:
+                                              "/tmp/%s/bucket_data" % self.master.ip)
+                with open("/tmp/%s/bucket_data" % self.master.ip) as f:
                     bucket_data = f.read().splitlines()
                     bucket_data = [x.replace(" ", "") for x in bucket_data]
                     bucket_data = [x.rstrip(",") for x in bucket_data]
@@ -1197,6 +1198,9 @@ class ImportExportTests(CliBaseTest):
                 self.log.info("Compare source data and bucket data")
                 if sorted(src_data) == sorted(bucket_data):
                     self.log.info("Import data match bucket data")
+                    if os.path.exists("/tmp/%s" % self.master.ip):
+                        self.log.info("Remove data in slave")
+                        shutil.rmtree("/tmp/%s" % self.master.ip)
                 else:
                     self.fail("Import data does not match bucket data")
             elif self.imex_type == "csv":
@@ -1261,17 +1265,18 @@ class ImportExportTests(CliBaseTest):
             found = self.shell.file_exists(self.ex_path, export_file_name)
             if found:
                 self.log.info("copy export file from remote to local")
-                if os.path.exists("/tmp/export"):
-                    shutil.rmtree("/tmp/export")
-                os.makedirs("/tmp/export")
+                if os.path.exists("/tmp/export%s" % self.master.ip):
+                    shutil.rmtree("/tmp/export%s" % self.master.ip)
+                os.makedirs("/tmp/export%s" % self.master.ip)
                 self.shell.copy_file_remote_to_local(self.ex_path+export_file_name,
-                                                    "/tmp/export/"+export_file_name)
+                                                    "/tmp/export%s/" % self.master.ip \
+                                                    + export_file_name)
                 self.log.info("compare 2 json files")
                 if self.format_type == "lines":
                     sample_file = open("resources/imex/json_%s_lines" % options["docs"])
                     samples = sample_file.read().splitlines()
                     samples = [x.replace(" ", "") for x in samples]
-                    export_file = open("/tmp/export/"+ export_file_name)
+                    export_file = open("/tmp/export%s/" % self.master.ip + export_file_name)
 
                     exports = export_file.read().splitlines()
                     for x in range(len(exports)):
@@ -1302,7 +1307,7 @@ class ImportExportTests(CliBaseTest):
                     samples = sample_file.read()
                     samples = ast.literal_eval(samples)
                     samples.sort(key=lambda k: k['name'])
-                    export_file = open("/tmp/export/"+ export_file_name)
+                    export_file = open("/tmp/export%s/" % self.master.ip + export_file_name)
                     exports = export_file.read()
                     exports = ast.literal_eval(exports)
                     exports.sort(key=lambda k: k['name'])

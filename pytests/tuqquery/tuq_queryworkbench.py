@@ -1,9 +1,9 @@
 import time
+
 from TestInput import TestInputSingleton
 from basetestcase import BaseTestCase
 from couchbase_helper.documentgenerator import BlobGenerator
 from membase.api.rest_client import RestConnection
-from tuq import QueryTests
 
 
 class QueryWorkbenchTests(BaseTestCase):
@@ -20,9 +20,8 @@ class QueryWorkbenchTests(BaseTestCase):
         "ITEM": 100,
         "NEW_ORDER": 100,
         "ORDERS": 100,
-        "ORDER_LINE": 100,
-        #"default:": 100
-        }
+        "ORDER_LINE": 100}
+        #"default:": 100}
 
     def setUp(self):
         super(QueryWorkbenchTests, self).setUp()
@@ -48,14 +47,8 @@ class QueryWorkbenchTests(BaseTestCase):
         self._load_all_buckets(self,self.servers[0], self.gen_create, "create", 0)
         #time.sleep(20)
 
-
-
-
-
     def tearDown(self):
         super(QueryWorkbenchTests, self).tearDown()
-
-
 
     def test_describe(self):
         for bucket_name in self.rest.get_buckets():

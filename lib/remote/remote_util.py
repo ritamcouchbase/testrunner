@@ -1,56 +1,49 @@
+import copy
+import json
+import logging
 import os
 import re
+import stat
 import sys
-import copy
+import time
 import urllib
 import uuid
-import time
-import logging
-import stat
-import json
-import TestInput
 from subprocess import Popen, PIPE
 
+import TestInput
 import logger
-from builds.build_query import BuildQuery
 import testconstants
-from testconstants import VERSION_FILE
-from testconstants import WIN_REGISTER_ID
-from testconstants import MEMBASE_VERSIONS
-from testconstants import COUCHBASE_VERSIONS
-from testconstants import MISSING_UBUNTU_LIB
-from testconstants import MV_LATESTBUILD_REPO
-from testconstants import SHERLOCK_BUILD_REPO
-from testconstants import COUCHBASE_VERSIONS
-from testconstants import WIN_CB_VERSION_3
-from testconstants import COUCHBASE_VERSION_2
-from testconstants import COUCHBASE_VERSION_3
-from testconstants import COUCHBASE_FROM_VERSION_3,\
-                          COUCHBASE_FROM_SPOCK, SYSTEMD_SERVER
-from testconstants import COUCHBASE_RELEASE_VERSIONS_3, CB_RELEASE_BUILDS
-from testconstants import SHERLOCK_VERSION, WIN_PROCESSES_KILLED
-from testconstants import COUCHBASE_FROM_VERSION_4, COUCHBASE_FROM_WATSON,\
-                          COUCHBASE_FROM_SPOCK
-from testconstants import RPM_DIS_NAME
-from testconstants import LINUX_DISTRIBUTION_NAME, LINUX_CB_PATH, \
-                          LINUX_COUCHBASE_BIN_PATH
-from testconstants import WIN_COUCHBASE_BIN_PATH,\
-                          WIN_CB_PATH
-from testconstants import WIN_COUCHBASE_BIN_PATH_RAW
-from testconstants import WIN_TMP_PATH, WIN_TMP_PATH_RAW
-from testconstants import WIN_UNZIP, WIN_PSSUSPEND
-
-from testconstants import MAC_CB_PATH, MAC_COUCHBASE_BIN_PATH
-
-from testconstants import CB_VERSION_NAME
-from testconstants import CB_REPO
+from builds.build_query import BuildQuery
+from membase.api.rest_client import RestConnection, RestHelper
 from testconstants import CB_RELEASE_APT_GET_REPO
 from testconstants import CB_RELEASE_YUM_REPO
-
-from testconstants import LINUX_NONROOT_CB_BIN_PATH,\
-                          NR_INSTALL_LOCATION_FILE
-
-from membase.api.rest_client import RestConnection, RestHelper
+from testconstants import CB_REPO
+from testconstants import CB_VERSION_NAME
+from testconstants import COUCHBASE_FROM_VERSION_3, \
+    SYSTEMD_SERVER
+from testconstants import COUCHBASE_FROM_VERSION_4, COUCHBASE_FROM_WATSON, \
+    COUCHBASE_FROM_SPOCK
+from testconstants import COUCHBASE_RELEASE_VERSIONS_3, CB_RELEASE_BUILDS
+from testconstants import COUCHBASE_VERSIONS
+from testconstants import COUCHBASE_VERSION_2
+from testconstants import COUCHBASE_VERSION_3
+from testconstants import LINUX_DISTRIBUTION_NAME, LINUX_CB_PATH, \
+    LINUX_COUCHBASE_BIN_PATH
+from testconstants import MAC_CB_PATH, MAC_COUCHBASE_BIN_PATH
+from testconstants import MEMBASE_VERSIONS
+from testconstants import MISSING_UBUNTU_LIB
+from testconstants import MV_LATESTBUILD_REPO
+from testconstants import NR_INSTALL_LOCATION_FILE
+from testconstants import RPM_DIS_NAME
+from testconstants import SHERLOCK_BUILD_REPO
+from testconstants import VERSION_FILE
+from testconstants import WIN_COUCHBASE_BIN_PATH, \
+    WIN_CB_PATH
+from testconstants import WIN_COUCHBASE_BIN_PATH_RAW
+from testconstants import WIN_PROCESSES_KILLED
+from testconstants import WIN_REGISTER_ID
+from testconstants import WIN_TMP_PATH, WIN_TMP_PATH_RAW
+from testconstants import WIN_UNZIP, WIN_PSSUSPEND
 
 log = logger.Logger.get_logger()
 logging.getLogger("paramiko").setLevel(logging.WARNING)
@@ -80,6 +73,9 @@ class RemoteMachineProcess(object):
     def __init__(self):
         self.pid = ''
         self.name = ''
+        self.vsz = 0
+        self.rss = 0
+        self.args = ''
 
 
 class RemoteMachineHelper(object):
@@ -108,18 +104,47 @@ class RemoteMachineHelper(object):
                 # we should have an option to wait for the process
                 # to start during the timeout
                 # process might have crashed
-                log.info("{0}:process {1} is not running or it might have crashed!".format(self.remote_shell.ip, process_name))
+                log.info("{0}:process {1} is not running or it might have crashed!"
+                                       .format(self.remote_shell.ip, process_name))
                 return False
             time.sleep(1)
         #            log.info('process {0} is running'.format(process_name))
         return True
+
+    def monitor_process_memory(self, process_name,
+                               duration_in_seconds=180,
+                               end=False):
+        # monitor this process and return list of memories in 7 seconds interval
+        end_time = time.time() + float(duration_in_seconds)
+        count = 0
+        vsz = []
+        rss = []
+        while time.time() < end_time and not end:
+            # get the process list
+            process = self.is_process_running(process_name)
+            if process:
+                vsz.append(process.vsz)
+                rss.append(process.rss)
+            else:
+                log.info("{0}:process {1} is not running.  Wait for 2 seconds"
+                                   .format(self.remote_shell.ip, process_name))
+                count += 1
+                time.sleep(2)
+                if count == 5:
+                    log.error("{0}:process {1} is not running at all."
+                                   .format(self.remote_shell.ip, process_name))
+                    exit(1)
+            log.info("sleep for 7 seconds before poll new processes")
+            time.sleep(7)
+        return vsz, rss
 
     def is_process_running(self, process_name):
         if getattr(self.remote_shell, "info", None) is None:
             self.remote_shell.info = self.remote_shell.extract_remote_info()
 
         if self.remote_shell.info.type.lower() == 'windows':
-             output, error = self.remote_shell.execute_command('tasklist| grep {0}'.format(process_name), debug=False)
+             output, error = self.remote_shell.execute_command('tasklist| grep {0}'
+                                                .format(process_name), debug=False)
              if error or output == [""] or output == []:
                  return None
              words = output[0].split(" ")
@@ -133,6 +158,8 @@ class RemoteMachineHelper(object):
             processes = self.remote_shell.get_running_processes()
             for process in processes:
                 if process.name == process_name:
+                    return process
+                elif process_name in process.args:
                     return process
             return None
 
@@ -204,11 +231,11 @@ class RemoteMachineShellConnection:
         while True:
             try:
                 if self.remote and serverInfo.ssh_key == '':
-                    self._ssh_client.connect(hostname=serverInfo.ip,
+                    self._ssh_client.connect(hostname=serverInfo.ip.replace('[', '').replace(']',''),
                                              username=serverInfo.ssh_username,
                                              password=serverInfo.ssh_password)
                 elif self.remote:
-                    self._ssh_client.connect(hostname=serverInfo.ip,
+                    self._ssh_client.connect(hostname=serverInfo.ip.replace('[', '').replace(']',''),
                                              username=serverInfo.ssh_username,
                                              key_filename=serverInfo.ssh_key)
                 break
@@ -256,7 +283,7 @@ class RemoteMachineShellConnection:
             try:
                 log.info("Connect to node: %s as user: %s" % (self.ip, user))
                 if self.remote and self.ssh_key == '':
-                    self._ssh_client.connect(hostname=self.ip,
+                    self._ssh_client.connect(hostname=self.ip.replace('[', '').replace(']',''),
                                              username=user,
                                              password=self.password)
                 break
@@ -288,15 +315,25 @@ class RemoteMachineShellConnection:
         # 26989 ?        00:00:51 pdflush
         # ps -Ao pid,comm
         processes = []
-        output, error = self.execute_command('ps -Ao pid,comm', debug=False)
+        output, error = self.execute_command('ps -Ao pid,comm,vsz,rss,args', debug=False)
         if output:
             for line in output:
                 # split to words
                 words = line.strip().split(' ')
+                words = filter(None, words)
                 if len(words) >= 2:
                     process = RemoteMachineProcess()
                     process.pid = words[0]
                     process.name = words[1]
+                    if words[2].isdigit():
+                        process.vsz = int(words[2])/1024
+                    else:
+                        process.vsz = words[2]
+                    if words[3].isdigit():
+                        process.rss = int(words[3])/1024
+                    else:
+                        process.rss = words[3]
+                    process.args = " ".join(words[4:])
                     processes.append(process)
         return processes
 
@@ -519,8 +556,9 @@ class RemoteMachineShellConnection:
             o, r = self.execute_command("taskkill /F /T /IM memcached*")
             self.log_command_output(o, r)
         else:
-            o, r = self.execute_command("kill -9 $(ps aux | grep 'memcached' "
-                                                    " | awk '{print $2}')")
+            # Changed from kill -9 $(ps aux | grep 'memcached' | awk '{print $2}' as grep was also returning eventing
+            # process which was using memcached-cert
+            o, r = self.execute_command("kill -9 $(ps aux | pgrep 'memcached')")
             self.log_command_output(o, r)
         return o, r
 
@@ -551,6 +589,26 @@ class RemoteMachineShellConnection:
             self.log_command_output(o, r)
         else:
             o, r = self.execute_command("killall -9 goxdcr")
+            self.log_command_output(o, r)
+        return o, r
+
+    def kill_eventing_process(self, name):
+        self.extract_remote_info()
+        if self.info.type.lower() == 'windows':
+            o, r = self.execute_command(command="taskkill /F /T /IM {0}*".format(name))
+            self.log_command_output(o, r)
+        else:
+            o, r = self.execute_command(command="killall -9 {0}".format(name))
+            self.log_command_output(o, r)
+        return o, r
+
+    def reboot_node(self):
+        self.extract_remote_info()
+        if self.extract_remote_info().type.lower() == 'windows':
+            o, r = self.execute_command("shutdown -r -f -t 0")
+            self.log_command_output(o, r)
+        elif self.extract_remote_info().type.lower() == 'linux':
+            o, r = self.execute_command("reboot")
             self.log_command_output(o, r)
         return o, r
 
@@ -733,6 +791,95 @@ class RemoteMachineShellConnection:
                    "===============\n".format(url)
             self.stop_current_python_running(mesg)
         return live_url
+
+    def is_ntp_installed(self):
+        ntp_installed = False
+        do_install = False
+        os_version = ""
+        log.info("Check if ntp is installed")
+        self.extract_remote_info()
+        if self.info.type.lower() == 'linux':
+            log.info("\nThis OS version %s" % self.info.distribution_version.lower())
+            if "centos 7" in self.info.distribution_version.lower():
+                os_version = "centos 7"
+                log.info("Check ntpd service in centos 7.x server")
+                output, e = self.execute_command("systemctl status ntpd")
+                for line in output:
+                    if "Active: active (running)" in line:
+                        log.info("ntp was installed in this server %s" % self.ip)
+                        ntp_installed = True
+                if not ntp_installed:
+                    log.info("ntp not installed yet or not run.\n"\
+                             "Let remove any old one and install ntp")
+                    self.execute_command("yum erase -y ntp")
+                    self.execute_command("yum install -y ntp")
+                    self.execute_command("systemctl start ntpd")
+                    self.execute_command("systemctl enable ntpd")
+                    self.execute_command("firewall-cmd --add-service=ntp --permanent")
+                    self.execute_command("firewall-cmd --reload")
+                    do_install = True
+                timezone, _ = self.execute_command("date")
+                if "PST" not in timezone[0]:
+                    log.info("Set time zone in centos 7 to America/Los_Angeles (PST)")
+                    self.execute_command("timedatectl set-timezone America/Los_Angeles")
+            elif "centos release 6" in self.info.distribution_version.lower():
+                os_version = "centos 6"
+                log.info("Check ntpd service in centos 6")
+                output, e = self.execute_command("/etc/init.d/ntpd status")
+                if not output:
+                    log.info("ntp was not installed on %s server yet.  "\
+                             "Let install ntp on this server " % self.ip)
+                    self.execute_command("yum install -y ntp ntpdate")
+                    self.execute_command("chkconfig ntpd on")
+                    self.execute_command("ntpdate pool.ntp.org")
+                    self.execute_command("/etc/init.d/ntpd start")
+                    do_install = True
+                elif output and "ntpd is stopped" in output[0]:
+                    log.info("ntp is not running.  Let remove it and install again in %s"\
+                                                            % self.ip)
+                    self.execute_command("yum erase -y ntp")
+                    self.execute_command("yum install -y ntp ntpdate")
+                    self.execute_command("chkconfig ntpd on")
+                    self.execute_command("ntpdate pool.ntp.org")
+                    self.execute_command("/etc/init.d/ntpd start")
+                    do_install = True
+                elif output and "is running..." in output[0]:
+                    ntp_installed = True
+                    log.info("ntp was installed in this server %s" % self.ip)
+                timezone, _ = self.execute_command("date")
+                if "PST" not in timezone[0]:
+                    log.info("Set time zone in centos 6 to America/Los_Angeles (PST)")
+                    self.execute_command("cp /etc/localtime /root/old.timezone")
+                    self.execute_command("rm -rf /etc/localtime")
+                    self.execute_command("ln -s /usr/share/zoneinfo/America/Los_Angeles "
+                                         "/etc/localtime")
+            else:
+                log.info("will add install in other os later, no set do install")
+
+        if do_install:
+            log.info("Check ntpd service after installed")
+            if os_version == "centos 7":
+                output, e = self.execute_command("systemctl status ntpd")
+                for line in output:
+                    if "Active: active (running)" in line:
+                        log.info("ntp is installed and running on this server %s" % self.ip)
+                        ntp_installed = True
+                        break;
+            if os_version == "centos 6":
+                output, e = self.execute_command("/etc/init.d/ntpd status")
+                if output and " is running..." in output[0]:
+                    log.info("ntp is installed and running on this server %s" % self.ip)
+                    ntp_installed = True
+
+        log.info("Date and time on this server %s" % self.ip)
+        output, _ = self.execute_command("date")
+        log.info("\n%s" % output)
+        if not ntp_installed and "centos" in os_version:
+            mesg = "\n===============\n"\
+                   "        This server {0} \n"\
+                   "        failed to install ntp service.\n"\
+                   "===============\n".format(self.ip)
+            self.stop_current_python_running(mesg)
 
     def download_build(self, build):
         return self.download_binary(build.url, build.deliverable_type, build.name, latest_url=build.url_latest_build)
@@ -1598,7 +1745,7 @@ class RemoteMachineShellConnection:
     """
     def install_server(self, build, startserver=True, path='/tmp', vbuckets=None,
                        swappiness=10, force=False, openssl='', upr=None, xdcr_upr=None,
-                       fts_query_limit=None):
+                       fts_query_limit=None, enable_ipv6=None):
 
         log.info('*****install server ***')
         server_type = None
@@ -1614,6 +1761,7 @@ class RemoteMachineShellConnection:
         else:
             raise Exception("its not a membase or couchbase?")
         self.extract_remote_info()
+
         log.info('deliverable_type : {0}'.format(self.info.deliverable_type))
         if self.info.type.lower() == 'windows':
             log.info('***** Doing the windows install')
@@ -1774,6 +1922,13 @@ class RemoteMachineShellConnection:
                 success &= self.log_command_output(output, error, track_words)
                 startserver = True
 
+            if enable_ipv6:
+                output, error = \
+                    self.execute_command("sed -i '/ipv6, /c \\{ipv6, true\}'. %s"
+                        % testconstants.LINUX_STATIC_CONFIG)
+                success &= self.log_command_output(output, error, track_words)
+                startserver = True
+
             # skip output: [WARNING] couchbase-server is already started
             # dirname error skipping for CentOS-6.6 (MB-12536)
             track_words = ("error", "fail", "dirname")
@@ -1813,7 +1968,8 @@ class RemoteMachineShellConnection:
         return success
 
     def install_server_win(self, build, version, startserver=True,
-                           vbuckets=None, fts_query_limit=None,windows_msi=False):
+                           vbuckets=None, fts_query_limit=None,
+                           enable_ipv6=None, windows_msi=False):
 
 
         log.info('******start install_server_win ********')
@@ -2645,7 +2801,18 @@ class RemoteMachineShellConnection:
                     log.warning("Ignore dirname error message during couchbase "
                                 "startup/stop/restart for CentOS 6.6 (MB-12536)")
                     success = True
+                elif "Created symlink from /etc/systemd/system" in line:
+                    log.info("This error is due to fix_failed_install.py script that only "
+                             "happens in centos 7")
+                    success = True
+                elif "Created symlink /etc/systemd/system/multi-user.target.wants/couchbase-server.service" in line:
+                    log.info(line)
+                    log.info("This message comes only in debian8 and debian9 during installation. "
+                             "This can be ignored.")
+                    success = True
                 else:
+                    log.info("\nIf couchbase server is running with this error."
+                              "\nGo to log_command_output to add error mesg to bypass it.")
                     success = False
         for line in output:
             log.info(line)
@@ -2927,7 +3094,7 @@ class RemoteMachineShellConnection:
                             etc_issue = line
                             break
                         # strip all extra characters
-                    etc_issue = etc_issue.rstrip('\n').rstrip('\\l').rstrip('\\n')
+                    etc_issue = etc_issue = etc_issue.rstrip('\n').rstrip(' ').rstrip('\\l').rstrip(' ').rstrip('\\n').rstrip(' ')
                     if etc_issue.lower().find('ubuntu') != -1:
                         os_distro = 'Ubuntu'
                         os_version = etc_issue
@@ -2971,7 +3138,7 @@ class RemoteMachineShellConnection:
                         os_version = etc_issue
                         is_linux_distro = True
                     else:
-                        log.info("It could be other operating systyem."
+                        log.info("It could be other operating system."
                                  "  Go to check at other location")
                     file.close()
                     # now remove this file
@@ -3254,7 +3421,7 @@ class RemoteMachineShellConnection:
             o, r = self.execute_command("open /Applications/Couchbase\ Server.app")
             self.log_command_output(o, r)
 
-    def pause_memcached(self, os="linux"):
+    def pause_memcached(self, os="linux", timesleep=30):
         log.info("*** pause memcached process ***")
         if os == "windows":
             self.check_cmd("pssuspend")
@@ -3264,6 +3431,8 @@ class RemoteMachineShellConnection:
         else:
             o, r = self.execute_command("killall -SIGSTOP memcached")
             self.log_command_output(o, r)
+        log.info("wait %s seconds to make node down." % timesleep)
+        time.sleep(timesleep)
 
     def unpause_memcached(self, os="linux"):
         log.info("*** unpause memcached process ***")
@@ -3673,7 +3842,7 @@ class RemoteMachineShellConnection:
         self.log_command_output(output, error)
         return output, error
 
-    def execute_cbcollect_info(self, file):
+    def execute_cbcollect_info(self, file, options=""):
         cbcollect_command = "%scbcollect_info" % (LINUX_COUCHBASE_BIN_PATH)
         if self.nonroot:
             cbcollect_command = "/home/%s%scbcollect_info" % (self.username,
@@ -3684,7 +3853,7 @@ class RemoteMachineShellConnection:
         if self.info.distribution_type.lower() == 'mac':
             cbcollect_command = "%scbcollect_info" % (MAC_COUCHBASE_BIN_PATH)
 
-        command = "%s %s" % (cbcollect_command, file)
+        command = "%s %s %s" % (cbcollect_command, file, options)
         output, error = self.execute_command(command, use_channel=True)
         return output, error
 

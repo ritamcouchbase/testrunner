@@ -1,5 +1,6 @@
-from xdcrnewbasetests import XDCRNewBaseTest
 from xdcrnewbasetests import Utility, BUCKET_NAME, OPS
+from xdcrnewbasetests import XDCRNewBaseTest
+
 """Testing Rebalance on Unidirectional and Bidirectional XDCR replication setup"""
 
 
@@ -167,6 +168,10 @@ class Rebalance(XDCRNewBaseTest):
     """
 
     def swap_rebalance_replication_with_ddoc_compaction(self):
+        bucket_type = self._input.param("bucket_type", "membase")
+        if bucket_type == "ephemeral":
+            self.log.info("Test case does not apply to ephemeral")
+            return
         try:
             self.setup_xdcr_and_load()
 
@@ -216,6 +221,10 @@ class Rebalance(XDCRNewBaseTest):
             pass
 
     def swap_rebalance_replication_with_view_queries_and_ops(self):
+        bucket_type = self._input.param("bucket_type", "membase")
+        if bucket_type == "ephemeral":
+            self.log.info("Test case does not apply to ephemeral")
+            return
         tasks = []
         try:
             self.setup_xdcr_and_load()

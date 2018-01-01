@@ -282,15 +282,16 @@ class BucketOperationHelper():
         while time.time() < end_time and len(ready_vbuckets) < vbucket_count:
             for every_ip_port in server_dict:
                 #Retrieve memcached ip and port
-                ip, port = every_ip_port.split(":")
+                ip = every_ip_port.rsplit(":", 1)[0]
+                port = every_ip_port.rsplit(":", 1)[1]
                 client = MemcachedClient(ip, int(port), timeout=30)
                 client.vbucket_count = len(vbuckets)
                 bucket_info = rest.get_bucket(bucket)
-                versions = rest.get_nodes_versions(logging=False)
-                pre_spock = False
-                for version in versions:
-                    if "5" > version:
-                        pre_spock = True
+                cluster_compatibility = rest.check_cluster_compatibility("5.0")
+                if cluster_compatibility is None:
+                    pre_spock = True
+                else:
+                    pre_spock = not cluster_compatibility
                 if pre_spock:
                     log.info("Atleast 1 of the server is on pre-spock "
                              "version. Using the old ssl auth to connect to "

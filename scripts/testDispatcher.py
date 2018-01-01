@@ -1,18 +1,12 @@
-import sys
-import urllib2
-import urllib
-import httplib2
 import json
-import string
 import time
-from optparse import OptionParser
 import traceback
+import urllib
+from optparse import OptionParser
 
-from couchbase import Couchbase
+import httplib2
 from couchbase.bucket import Bucket
-from couchbase.exceptions import CouchbaseError
 from couchbase.n1ql import N1QLQuery
-
 
 # takes an ini template as input, standard out is populated with the server pool
 # need a descriptor as a parameter
@@ -38,6 +32,9 @@ def getNumberOfAddpoolServers(iniFile, addPoolId):
         return contents.count(addPoolId)
     except:
         return 0
+
+def rreplace(str, pattern, num_replacements):
+    return str.rsplit(pattern, num_replacements)[0]
 
 def main():
 
@@ -392,15 +389,18 @@ def main():
 
                         if options.serverType.lower() != 'docker':
                             r2 = json.loads(content)
-                            url = url + '&servers=' + urllib.quote(json.dumps(r2).replace(' ',''))
+                            servers = json.dumps(r2).replace(' ','').replace('[','', 1)
+                            servers = rreplace(servers, ']', 1)
+                            url = url + '&servers=' + urllib.quote(servers)
 
                             if testsToLaunch[i]['addPoolServerCount']:
-                                addPoolServers = json.loads(content2)
+                                addPoolServers = content2.replace(' ','')\
+                                                   .replace('[','', 1)
+                                addPoolServers = rreplace(addPoolServers, ']', 1)
                                 url = url + '&addPoolServerId=' +\
                                       options.addPoolId +\
                                       '&addPoolServers=' +\
-                                      urllib.quote(json.dumps(addPoolServers).
-                                                   replace(' ',''))
+                                      urllib.quote(addPoolServers)
 
 
                         print '\n', time.asctime( time.localtime(time.time()) ), 'launching ', url

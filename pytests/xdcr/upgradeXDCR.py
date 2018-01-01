@@ -1,21 +1,18 @@
-from threading import Thread
-import re
-import copy
 import Queue
-from datetime import datetime
-from membase.api.rest_client import RestConnection, Bucket
-from newupgradebasetest import NewUpgradeBaseTest
-from xdcrnewbasetests import XDCRNewBaseTest, NodeHelper
+import copy
+import re
+
 from TestInput import TestInputSingleton
-from remote.remote_util import RemoteMachineShellConnection
-from membase.api.rest_client import RestConnection, RestHelper
-from membase.api.exception import RebalanceFailedException
-from membase.helper.cluster_helper import ClusterOperationHelper
-from couchbase_helper.documentgenerator import BlobGenerator
-from remote.remote_util import RemoteMachineShellConnection
 from couchbase_helper.document import DesignDocument, View
-from testconstants import STANDARD_BUCKET_PORT
+from couchbase_helper.documentgenerator import BlobGenerator
+from membase.api.rest_client import RestConnection
+from membase.helper.cluster_helper import ClusterOperationHelper
+from newupgradebasetest import NewUpgradeBaseTest
+from remote.remote_util import RemoteMachineShellConnection
 from security.rbac_base import RbacBase
+from testconstants import STANDARD_BUCKET_PORT
+from xdcrnewbasetests import XDCRNewBaseTest, NodeHelper
+
 
 class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
     def setUp(self):
@@ -42,6 +39,7 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
         self.upgrade_same_version = self.input.param("upgrade_same_version", 0)
         self.ddocs_src = []
         self.ddocs_dest = []
+        self.skip_this_version = False
 
     def create_buckets(self):
         XDCRNewBaseTest.setUp(self)
@@ -63,7 +61,8 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
 
     def tearDown(self):
         try:
-            XDCRNewBaseTest.tearDown(self)
+            if not self.skip_this_version:
+                XDCRNewBaseTest.tearDown(self)
         finally:
             self.cluster.shutdown(force=True)
 
@@ -160,8 +159,13 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
         self.cluster.rebalance(update_servers + extra_servers, [], update_servers)
 
     def offline_cluster_upgrade(self):
+        if self.bucket_type == "ephemeral" and  float(self.initial_version[:3]) < 5.0:
+            self.log.info("Ephemeral buckets not available in version " + str(self.initial_version))
+            self.skip_this_version = True
+            return
         if self.initial_version[:3] >= self.upgrade_versions[0][:3]:
             self.log.info("Initial version greater than upgrade version - not supported")
+            self.skip_this_version = True
             return
         # install on src and dest nodes
         self._install(self.servers[:self.src_init + self.dest_init ])
@@ -319,11 +323,22 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
                             node,
                             "Failed to repair connections to target cluster",
                             goxdcr_log)
+                count4 = NodeHelper.check_goxdcr_log(
+                    node,
+                    "received error response from setMeta client. Repairing connection. response status=EINVAL",
+                    goxdcr_log)
+                count5 = NodeHelper.check_goxdcr_log(
+                    node,
+                    "GOGC in new global setting is 0, which is not a valid value and can only have come from "
+                    "upgrade. Changed it to 100 instead.",
+                    goxdcr_log)
                 if count1 > 0 or count2 > 0:
                     self.assertEqual(count3, 0, "Failed to repair connections to target cluster "
-                                        "error message found in " + str(node.ip))
+                                                "error message found in " + str(node.ip))
                     self.log.info("Failed to repair connections to target cluster "
-                                        "error message not found as expected in " + str(node.ip))
+                                  "error message not found as expected in " + str(node.ip))
+                self.assertEqual(count4, 0, "Disconnect errors found in " + str(node.ip))
+                self.assertEqual(count5, 0, "GOGC reset to 0 during upgrade in " + str(node.ip))
 
     def is_goxdcr_migration_successful(self, server):
         count = NodeHelper.check_goxdcr_log(server,
@@ -350,8 +365,13 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
         return True
 
     def online_cluster_upgrade(self):
+        if self.bucket_type == "ephemeral" and  float(self.initial_version[:3]) < 5.0:
+            self.log.info("Ephemeral buckets not available in version " + str(self.initial_version))
+            self.skip_this_version = True
+            return
         if self.initial_version[:3] >= self.upgrade_versions[0][:3]:
             self.log.info("Initial version greater than upgrade version - not supported")
+            self.skip_this_version = True
             return
         self._install(self.servers[:self.src_init + self.dest_init])
         prev_initial_version = self.initial_version
@@ -514,15 +534,31 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
                             node,
                             "Failed to repair connections to target cluster",
                             goxdcr_log)
+                count4 = NodeHelper.check_goxdcr_log(
+                    node,
+                    "received error response from setMeta client. Repairing connection. response status=EINVAL",
+                    goxdcr_log)
+                count5 = NodeHelper.check_goxdcr_log(
+                    node,
+                    "GOGC in new global setting is 0, which is not a valid value and can only have come from "
+                    "upgrade. Changed it to 100 instead.",
+                    goxdcr_log)
                 if count1 > 0 or count2 > 0:
                     self.assertEqual(count3, 0, "Failed to repair connections to target cluster "
-                                        "error message found in " + str(node.ip))
+                                                "error message found in " + str(node.ip))
                     self.log.info("Failed to repair connections to target cluster "
-                                        "error message not found as expected in " + str(node.ip))
+                                  "error message not found as expected in " + str(node.ip))
+                self.assertEqual(count4, 0, "Disconnect errors found in " + str(node.ip))
+                self.assertEqual(count5, 0, "GOGC reset to 0 during upgrade in " + str(node.ip))
 
     def incremental_offline_upgrade(self):
+        if self.bucket_type == "ephemeral" and  float(self.initial_version[:3]) < 5.0:
+            self.log.info("Ephemeral buckets not available in version " + str(self.initial_version))
+            self.skip_this_version = True
+            return
         if self.initial_version[:3] >= self.upgrade_versions[0][:3]:
             self.log.info("Initial version greater than upgrade version - not supported")
+            self.skip_this_version = True
             return
         upgrade_seq = self.input.param("upgrade_seq", "src>dest")
         self._install(self.servers[:self.src_init + self.dest_init ])
@@ -613,11 +649,23 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
                             node,
                             "Failed to repair connections to target cluster",
                             goxdcr_log)
+                count4 = NodeHelper.check_goxdcr_log(
+                    node,
+                    "received error response from setMeta client. Repairing connection. response status=EINVAL",
+                    goxdcr_log)
+                count5 = NodeHelper.check_goxdcr_log(
+                    node,
+                    "GOGC in new global setting is 0, which is not a valid value and can only have come from "
+                    "upgrade. Changed it to 100 instead.",
+                    goxdcr_log)
                 if count1 > 0 or count2 > 0:
                     self.assertEqual(count3, 0, "Failed to repair connections to target cluster "
-                                        "error message found in " + str(node.ip))
+                                                "error message found in " + str(node.ip))
                     self.log.info("Failed to repair connections to target cluster "
-                                        "error message not found as expected in " + str(node.ip))
+                                  "error message not found as expected in " + str(node.ip))
+                self.assertEqual(count4, 0, "Disconnect errors found in " + str(node.ip))
+                self.assertEqual(count5, 0, "GOGC reset to 0 during upgrade in " + str(node.ip))
+
     def _operations(self):
         # TODO: there are not tests with views
         if self.ddocs_num_src:
@@ -731,10 +779,15 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
             self.sleep(self.expire_time)
 
     def test_backward_compatibility(self):
+        if self.bucket_type == "ephemeral" and  float(self.initial_version[:3]) < 5.0:
+            self.log.info("Ephemeral buckets not available in version " + str(self.initial_version))
+            self.skip_this_version = True
+            return
         self.c1_version = self.initial_version
         self.c2_version = self.upgrade_versions[0]
         if self.c1_version[:3] >= self.c2_version[:3]:
             self.log.info("Initial version greater than upgrade version - not supported")
+            self.skip_this_version = True
             return
         # install older version on C1
         self._install(self.servers[:self.src_init])
@@ -810,8 +863,19 @@ class UpgradeTests(NewUpgradeBaseTest,XDCRNewBaseTest):
                             node,
                             "Failed to repair connections to target cluster",
                             goxdcr_log)
+                count4 = NodeHelper.check_goxdcr_log(
+                            node,
+                            "received error response from setMeta client. Repairing connection. response status=EINVAL",
+                            goxdcr_log)
+                count5 = NodeHelper.check_goxdcr_log(
+                            node,
+                            "GOGC in new global setting is 0, which is not a valid value and can only have come from "
+                            "upgrade. Changed it to 100 instead.",
+                            goxdcr_log)
                 if count1 > 0 or count2 > 0:
                     self.assertEqual(count3, 0, "Failed to repair connections to target cluster "
                                         "error message found in " + str(node.ip))
                     self.log.info("Failed to repair connections to target cluster "
                                         "error message not found as expected in " + str(node.ip))
+                self.assertEqual(count4, 0, "Disconnect errors found in " + str(node.ip))
+                self.assertEqual(count5, 0, "GOGC reset to 0 during upgrade in " + str(node.ip))

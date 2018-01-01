@@ -1,10 +1,13 @@
-import subprocess, time, os
+import os
 from subprocess import call
+from threading import Thread
+
 from clitest.cli_base import CliBaseTest
+from couchbase_helper.document import View
 from couchbase_helper.documentgenerator import BlobGenerator
 from membase.api.rest_client import RestConnection, RestHelper
-
-from couchbase_helper.document import View
+from remote.remote_util import RemoteMachineHelper, \
+    RemoteMachineShellConnection
 
 LOG_FILE_NAME_LIST = ["couchbase.log", "diag.log", "ddocs.log", "ini.log", "syslog.tar.gz",
                       "ns_server.couchdb.log", "ns_server.debug.log", "ns_server.babysitter.log",
@@ -24,6 +27,7 @@ class CollectinfoTests(CliBaseTest):
         self.expire_time = self.input.param("expire_time", 5)
         self.value_size = self.input.param("value_size", 256)
         self.node_down = self.input.param("node_down", False)
+        self.collect_all_option = self.input.param("collect-all-option", False)
         if self.doc_ops is not None:
             self.doc_ops = self.doc_ops.split(";")
 
@@ -228,3 +232,84 @@ class CollectinfoTests(CliBaseTest):
                 raise ex
         self.shell.execute_cbcollect_info("%s.zip" % (self.log_filename))
         self.verify_results(self, self.log_filename)
+
+    def test_default_collect_logs_in_cluster(self):
+        """
+           In a cluster, if we run cbcollectinfo from 1 node, it will collect logs
+           on 1 node only.
+           Initial nodes: 3
+        """
+        gen_load = BlobGenerator('cbcollect', 'cbcollect-', self.value_size,
+                                                            end=self.num_items)
+        self._load_all_buckets(self.master, gen_load, "create", 0)
+        self._wait_for_stats_all_buckets(self.servers[:self.num_servers])
+        self.log.info("Delete old logs files")
+        self.shell.delete_files("%s.zip" % (self.log_filename))
+        self.log.info("Delete old logs directory")
+        self.shell.delete_files("cbcollect_info*")
+        options = ""
+        if self.collect_all_option:
+            options = "--multi-node-diag"
+            self.log.info("Run collect log with --multi-node-diag option")
+        output, error = self.shell.execute_cbcollect_info("%s.zip %s"\
+                                                       % (self.log_filename, options))
+        if output:
+            if self.debug_logs:
+                    self.shell.log_command_output(output, error)
+            for line in output:
+                if "--multi-node-diag" in options:
+                    if "noLogs=1&oneNode=1" in line:
+                        self.log.error("Error line: %s" % line)
+                        self.fail("cbcollect got diag only from 1 node")
+                if not options:
+                    if "noLogs=1" in line:
+                        if "oneNode=1" not in line:
+                            self.log.error("Error line: %s" % line)
+                            self.fail("cbcollect did not set to collect diag only at 1 node ")
+        self.verify_results(self, self.log_filename)
+
+    def test_cbcollectinfo_memory_usuage(self):
+        """
+           Test to make sure cbcollectinfo did not use a lot of memory.
+           We run test with 200K items with size 128 bytes
+        """
+        gen_load = BlobGenerator('cbcollect', 'cbcollect-', self.value_size,
+                                                            end=200000)
+        self._load_all_buckets(self.master, gen_load, "create", 0)
+        self._wait_for_stats_all_buckets(self.servers[:self.num_servers])
+        self.log.info("Delete old logs files")
+        self.shell.delete_files("%s.zip" % (self.log_filename))
+        self.log.info("Delete old logs directory")
+        self.shell.delete_files("cbcollect_info*")
+        options = ""
+        if self.collect_all_option:
+            options = "--multi-node-diag"
+            self.log.info("Run collect log with --multi-node-diag option")
+
+        collect_threads = []
+        col_thread = Thread(target=self.shell.execute_cbcollect_info,
+                                        args=("%s.zip" % (self.log_filename), options))
+        collect_threads.append(col_thread)
+        col_thread.start()
+        monitor_mem_thread = Thread(target=self._monitor_collect_log_mem_process)
+        collect_threads.append(monitor_mem_thread)
+        monitor_mem_thread.start()
+        self.thred_end = False
+        while not self.thred_end:
+            if not col_thread.isAlive():
+                self.thred_end = True
+        for t in collect_threads:
+            t.join()
+
+    def _monitor_collect_log_mem_process(self):
+        mem_stat = []
+        results = []
+        shell = RemoteMachineShellConnection(self.master)
+        vsz, rss = RemoteMachineHelper(shell).monitor_process_memory('cbcollect_info')
+        vsz_delta = max(abs(x - y) for (x, y) in zip(vsz[1:], vsz[:-1]))
+        rss_delta = max(abs(x - y) for (x, y) in zip(rss[1:], rss[:-1]))
+        self.log.info("The largest delta in VSZ: %s KB " % vsz_delta)
+        self.log.info("The largest delta in RSS: %s KB " % rss_delta)
+
+        if vsz_delta > 20000:
+            self.fail("cbcollect_info process spikes up to 20 MB")

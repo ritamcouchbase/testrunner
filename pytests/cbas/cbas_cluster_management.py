@@ -1,5 +1,4 @@
 from cbas_base import *
-from membase.api.rest_client import RestHelper
 from couchbase_cli import CouchbaseCLI
 
 class CBASClusterManagement(CBASBaseTest):
@@ -160,7 +159,6 @@ class CBASClusterManagement(CBASBaseTest):
         for cbas_server in self.cbas_servers:
             if cbas_server.ip == self.master.ip:
                 continue
-            from random import randint
             service = ["kv","cbas"]
             self.log.info("Adding %s to the cluster with services %s"%(cbas_server,service))
             self.add_node(node=cbas_server,services=service,wait_for_rebalance_completion=wait_for_rebalance)
@@ -177,9 +175,9 @@ class CBASClusterManagement(CBASBaseTest):
             self.perform_doc_ops_in_all_cb_buckets(test_docs, "create", test_docs*i, test_docs*(i+1))
 #             self.connect_to_bucket(self.cbas_bucket_name, self.cb_bucket_name)
             
-            if self.rest._rebalance_progress_status() == 'running':
-                self.assertTrue((self.get_num_items_in_cbas_dataset(self.cbas_dataset_name))[0] == docs_to_verify,
-                            "Number of items in CBAS is different from CB after adding further cbas node.")
+#             if self.rest._rebalance_progress_status() == 'running':
+#                 self.assertTrue((self.get_num_items_in_cbas_dataset(self.cbas_dataset_name))[0] == docs_to_verify,
+#                             "Number of items in CBAS is different from CB after adding further cbas node.")
             
             docs_to_verify = docs_to_verify + test_docs
             # Wait for the rebalance to be completed.

@@ -2,15 +2,15 @@
 
 # TODO: add installer support for membasez
 
-import getopt
-import copy, re
-import logging
-import os
-import sys
-from threading import Thread
-from datetime import datetime
-import socket
 import Queue
+import copy
+import getopt
+import os
+import re
+import socket
+import sys
+from datetime import datetime
+from threading import Thread
 
 sys.path = [".", "lib"] + sys.path
 import testconstants
@@ -22,12 +22,9 @@ from membase.api.rest_client import RestConnection, RestHelper
 from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
 from membase.helper.cluster_helper import ClusterOperationHelper
 from testconstants import MV_LATESTBUILD_REPO
-from testconstants import SHERLOCK_BUILD_REPO
-from testconstants import COUCHBASE_REPO
-from testconstants import CB_REPO
+from testconstants import CB_REPO, CB_DOWNLOAD_SERVER, CB_DOWNLOAD_SERVER_FQDN
 from testconstants import COUCHBASE_VERSION_2
-from testconstants import COUCHBASE_VERSION_3, COUCHBASE_FROM_WATSON,\
-                          COUCHBASE_FROM_SPOCK
+from testconstants import COUCHBASE_VERSION_3, COUCHBASE_FROM_SPOCK
 from testconstants import CB_VERSION_NAME, COUCHBASE_FROM_VERSION_4,\
                           CB_RELEASE_BUILDS, COUCHBASE_VERSIONS
 from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA, CBAS_QUOTA
@@ -61,6 +58,7 @@ Available keys:
  fts_query_limit=1000000    Set a limit for the max results to be returned by fts for any query
  change_indexer_ports=false Sets indexer ports values to non-default ports
  storage_mode=plasma        Sets indexer storage mode
+ enable_ipv6=False          Enable ipv6 mode in ns_server
 
 
 Examples:
@@ -291,6 +289,9 @@ class Installer(object):
                     build_repo = CB_REPO + CB_VERSION_NAME[version[:3]] + "/"
                 else:
                     sys.exit("version is not support yet")
+            if 'enable_ipv6' in params and params['enable_ipv6']:
+                build_repo = build_repo.replace(CB_DOWNLOAD_SERVER,
+                                                CB_DOWNLOAD_SERVER_FQDN)
             for name in names:
                 if version[:5] in releases_version:
                     build = BuildQuery().find_membase_release_build(
@@ -478,6 +479,9 @@ class CouchbaseServerInstaller(Installer):
                 if params.get('use_domain_names', 0):
                     RemoteUtilHelper.use_hostname_for_server_settings(server)
 
+                if params.get('enable_ipv6', 0):
+                    RestConnection(server).rename_node(hostname=server.ip)
+
                 # Make sure that data_path and index_path are writable by couchbase user
                 for path in set(filter(None, [server.data_path, server.index_path])):
                     time.sleep(3)
@@ -567,6 +571,7 @@ class CouchbaseServerInstaller(Installer):
                 remote_client.check_man_page()
                 """ add unzip command on server if it is not available """
                 remote_client.check_cmd("unzip")
+                remote_client.is_ntp_installed()
                 remote_client.disconnect()
                 # TODO: Make it work with windows
                 if "erlang_threads" in params:
@@ -652,6 +657,12 @@ class CouchbaseServerInstaller(Installer):
         else:
             fts_query_limit = None
 
+        if "enable_ipv6" in params:
+            enable_ipv6 = params["enable_ipv6"]
+            start_server = False
+        else:
+            enable_ipv6 = None
+
         if "linux_repo" in params and params["linux_repo"].lower() == "true":
             linux_repo = True
         else:
@@ -674,9 +685,11 @@ class CouchbaseServerInstaller(Installer):
                                        params["version"].replace("-rel", ""),
                                        vbuckets=vbuckets,
                                        fts_query_limit=fts_query_limit,
+                                       enable_ipv6=enable_ipv6,
                                        windows_msi=self.msi )
             else:
                 downloaded = remote_client.download_build(build)
+
                 if not downloaded:
                     sys.exit('server {1} unable to download binaries : {0}' \
                                      .format(build.url, params["server"].ip))
@@ -687,7 +700,8 @@ class CouchbaseServerInstaller(Installer):
                                          startserver=start_server,\
                                          vbuckets=vbuckets, swappiness=swappiness,\
                                         openssl=openssl, upr=upr, xdcr_upr=xdcr_upr,
-                                        fts_query_limit=fts_query_limit)
+                                        fts_query_limit=fts_query_limit,
+                                        enable_ipv6=enable_ipv6)
                     log.info('wait 5 seconds for Couchbase server to start')
                     time.sleep(5)
                     if "rest_vbuckets" in params:
@@ -1009,6 +1023,11 @@ class InstallerJob(object):
         queue = Queue.Queue()
         success = True
         for server in servers:
+            if params.get('enable_ipv6',0):
+                if re.match('\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', server.ip):
+                    sys.exit("****************************** ERROR: You are "
+                             "trying to enable IPv6 on an IPv4 machine, "
+                             "run without enable_ipv6=True ******************")
             _params = copy.deepcopy(params)
             _params["server"] = server
             u_t = Thread(target=installer_factory(params).uninstall,

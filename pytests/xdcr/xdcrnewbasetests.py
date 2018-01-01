@@ -1,30 +1,28 @@
-import unittest
-import time
 import copy
-import logger
 import logging
 import re
+import time
+import unittest
 
+import logger
+from TestInput import TestInputSingleton
 from couchbase_helper.cluster import Cluster
-from membase.api.rest_client import RestConnection, Bucket
+from couchbase_helper.document import View
+from couchbase_helper.documentgenerator import BlobGenerator, DocumentGenerator
+from couchbase_helper.stats_tools import StatsCommon
+from lib.membase.api.exception import XDCRException
 from membase.api.exception import ServerUnavailableException
+from membase.api.rest_client import RestConnection, Bucket
+from membase.helper.bucket_helper import BucketOperationHelper
+from membase.helper.cluster_helper import ClusterOperationHelper
+from memcached.helper.data_helper import MemcachedClientHelper
 from remote.remote_util import RemoteMachineShellConnection
 from remote.remote_util import RemoteUtilHelper
-from testconstants import STANDARD_BUCKET_PORT
-from couchbase_helper.document import View
-from membase.helper.cluster_helper import ClusterOperationHelper
-from couchbase_helper.stats_tools import StatsCommon
-from membase.helper.bucket_helper import BucketOperationHelper
-from memcached.helper.data_helper import MemcachedClientHelper
-from TestInput import TestInputSingleton
-from scripts.collect_server_info import cbcollectRunner
 from scripts import collect_data_files
-from tasks.future import TimeoutError
-
-from couchbase_helper.documentgenerator import BlobGenerator, DocumentGenerator
-from lib.membase.api.exception import XDCRException
+from scripts.collect_server_info import cbcollectRunner
 from security.auditmain import audit
 from security.rbac_base import RbacBase
+from testconstants import STANDARD_BUCKET_PORT
 
 
 class RenameNodeException(XDCRException):
@@ -93,6 +91,7 @@ class OPS:
 
 class EVICTION_POLICY:
     VALUE_ONLY = "valueOnly"
+    NO_EVICTION = "noEviction"
 
 
 class BUCKET_PRIORITY:
@@ -1108,7 +1107,7 @@ class CouchbaseCluster:
                     audit_obj.setAuditEnable('true')
 
     def _create_bucket_params(self, server, replicas=1, size=0, port=11211, password=None,
-                             bucket_type='membase', enable_replica_index=1, eviction_policy='valueOnly',
+                             bucket_type=None, enable_replica_index=1, eviction_policy='valueOnly',
                              bucket_priority=None, flush_enabled=1, lww=False):
         """Create a set of bucket_parameters to be sent to all of the bucket_creation methods
         Parameters:
@@ -1134,9 +1133,13 @@ class CouchbaseCluster:
         bucket_params['size'] = size
         bucket_params['port'] = port
         bucket_params['password'] = password
+        bucket_type = TestInputSingleton.input.param("bucket_type", "membase")
         bucket_params['bucket_type'] = bucket_type
         bucket_params['enable_replica_index'] = enable_replica_index
-        bucket_params['eviction_policy'] = eviction_policy
+        if bucket_type == "ephemeral":
+            bucket_params['eviction_policy'] = EVICTION_POLICY.NO_EVICTION
+        else:
+            bucket_params['eviction_policy'] = eviction_policy
         bucket_params['bucket_priority'] = bucket_priority
         bucket_params['flush_enabled'] = flush_enabled
         bucket_params['lww'] = lww
@@ -3510,10 +3513,20 @@ class XDCRNewBaseTest(unittest.TestCase):
                     self.log.error(e)
                 if not skip_key_validation:
                     try:
-                        src_active_passed, src_replica_passed =\
-                            src_cluster.verify_items_count(timeout=self._item_count_timeout)
-                        dest_active_passed, dest_replica_passed = \
-                            dest_cluster.verify_items_count(timeout=self._item_count_timeout)
+                        if len(src_cluster.get_nodes()) > 1:
+                            src_active_passed, src_replica_passed =\
+                                src_cluster.verify_items_count(timeout=self._item_count_timeout)
+                        else:
+                            self.log.info("Skipped active replica count check as source cluster has 1 node only")
+                            src_active_passed = True
+                            src_replica_passed = True
+                        if len(dest_cluster.get_nodes()) > 1:
+                            dest_active_passed, dest_replica_passed = \
+                                dest_cluster.verify_items_count(timeout=self._item_count_timeout)
+                        else:
+                            self.log.info("Skipped active replica count check as dest cluster has 1 node only")
+                            dest_active_passed = True
+                            dest_replica_passed = True
 
                         src_cluster.verify_data(max_verify=self._max_verify, skip=skip_verify_data)
                         dest_cluster.verify_data(max_verify=self._max_verify, skip=skip_verify_data)

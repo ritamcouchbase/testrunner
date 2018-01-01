@@ -1,7 +1,8 @@
 import threading
-from tuq import QueryTests
+
 from newupgradebasetest import NewUpgradeBaseTest
 from remote.remote_util import RemoteMachineShellConnection
+from tuq import QueryTests
 
 
 class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
@@ -9,13 +10,7 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
     def setUp(self):
         super(QueriesUpgradeTests, self).setUp()
         self.rest = None
-        if hasattr(self, 'shell'):
-           o = self.shell.execute_command("ps -aef| grep cbq-engine")
-           if len(o):
-               for cbq_engine in o[0]:
-                   if cbq_engine.find('grep') == -1:
-                       pid = [item for item in cbq_engine.split(' ') if item][1]
-                       self.shell.execute_command("kill -9 %s" % pid)
+        self._kill_all_processes_cbq()
 
     def suite_setUp(self):
         super(QueriesUpgradeTests, self).suite_setUp()
@@ -24,8 +19,8 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
         super(QueriesUpgradeTests, self).tearDown()
         if self._testMethodName == 'suite_tearDown' and str(self.__call__).find('setUp') == -1:
             for th in threading.enumerate():
-                if th != threading.current_thread():
-                    th._Thread__stop()
+                th._Thread__stop() if th != threading.current_thread() else None
+
 
     def suite_tearDown(self):
         super(QueriesUpgradeTests, self).suite_tearDown()
@@ -42,12 +37,7 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
             upgrade_thread.join()
         self.cluster.rebalance(self.servers[:1], self.servers[1:2], [])
         self.shell = RemoteMachineShellConnection(self.servers[1])
-        o = self.shell.execute_command("ps -aef| grep cbq-engine")
-        if len(o):
-            for cbq_engine in o[0]:
-                if cbq_engine.find('grep') == -1:
-                    pid = [item for item in cbq_engine.split(' ') if item][1]
-                    self.shell.execute_command("kill -9 %s" % pid)
+        self._kill_all_processes_cbq()
         self._start_command_line_query(self.servers[1])
         self.shell.execute_command("ps -aef| grep cbq-engine")
         self.master = self.servers[1]
@@ -63,12 +53,7 @@ class QueriesUpgradeTests(QueryTests, NewUpgradeBaseTest):
         upgrade_threads = self._async_update(self.upgrade_versions[0], self.servers[:2])
         for upgrade_thread in upgrade_threads:
             upgrade_thread.join()
-        o = self.shell.execute_command("ps -aef| grep cbq-engine")
-        if len(o):
-            for cbq_engine in o[0]:
-                if cbq_engine.find('grep') == -1:
-                    pid = [item for item in cbq_engine.split(' ') if item][1]
-                    self.shell.execute_command("kill -9 %s" % pid)
+        self._kill_all_processes_cbq()
         self._start_command_line_query(self.master)
         self.create_primary_index_for_3_0_and_greater()
         getattr(self, method_name)()

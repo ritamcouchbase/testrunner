@@ -109,6 +109,10 @@ class bidirectional(XDCRNewBaseTest):
         self.verify_results()
 
     def load_with_async_ops_and_joint_sets_with_warmup(self):
+        bucket_type = self._input.param("bucket_type", "membase")
+        if bucket_type == "ephemeral":
+            "Test case does not apply for Ephemeral buckets"
+            return
         self.setup_xdcr_and_load()
         warmupnodes = []
         if "C1" in self._warmup:
@@ -194,7 +198,13 @@ class bidirectional(XDCRNewBaseTest):
     a full verification: wait for the disk queues to drain
     and then verify that there has been no data loss on both clusters."""
     def replication_with_ddoc_compaction(self):
+        bucket_type = self._input.param("bucket_type", "membase")
+        if bucket_type == "ephemeral":
+            self.log.info("Test case does not apply to ephemeral")
+            return
+
         self.setup_xdcr()
+
         self.src_cluster.load_all_buckets(self._num_items)
         self.dest_cluster.load_all_buckets(self._num_items)
 
@@ -233,9 +243,14 @@ class bidirectional(XDCRNewBaseTest):
         self.verify_results()
 
     def replication_with_view_queries_and_ops(self):
+        bucket_type = self._input.param("bucket_type", "membase")
+        if bucket_type == "ephemeral":
+            self.log.info("Test case does not apply to ephemeral")
+            return
         tasks = []
         try:
             self.setup_xdcr()
+
             self.src_cluster.load_all_buckets(self._num_items)
             self.dest_cluster.load_all_buckets(self._num_items)
 
@@ -347,6 +362,10 @@ class bidirectional(XDCRNewBaseTest):
         self.verify_results()
 
     def replication_while_rebooting_a_non_master_src_dest_node(self):
+        bucket_type = self._input.param("bucket_type", "membase")
+        if bucket_type == "ephemeral":
+            self.log.info("Test case does not apply to ephemeral")
+            return
         self.setup_xdcr_and_load()
         self.async_perform_update_delete()
         self.sleep(self._wait_timeout)
@@ -396,6 +415,16 @@ class bidirectional(XDCRNewBaseTest):
             self.log.info(e)
 
     def test_rollback(self):
+        bucket = self.src_cluster.get_buckets()[0]
+        src_nodes = self.src_cluster.get_nodes()
+        dest_nodes = self.dest_cluster.get_nodes()
+        nodes = src_nodes + dest_nodes
+
+        # Stop Persistence on Node A & Node B
+        for node in nodes:
+            mem_client = MemcachedClientHelper.direct_client(node, bucket)
+            mem_client.stop_persistence()
+
         goxdcr_log = NodeHelper.get_goxdcr_log_dir(self._input.servers[0])\
                      + '/goxdcr.log*'
         self.setup_xdcr()
@@ -410,16 +439,6 @@ class bidirectional(XDCRNewBaseTest):
 
         self.src_cluster.resume_all_replications()
         self.dest_cluster.resume_all_replications()
-
-        bucket = self.src_cluster.get_buckets()[0]
-        src_nodes = self.src_cluster.get_nodes()
-        dest_nodes = self.dest_cluster.get_nodes()
-        nodes = src_nodes + dest_nodes
-
-        # Stop Persistence on Node A & Node B
-        for node in nodes:
-            mem_client = MemcachedClientHelper.direct_client(node, bucket)
-            mem_client.stop_persistence()
 
         # Perform mutations on the bucket
         self.async_perform_update_delete()

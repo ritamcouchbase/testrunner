@@ -1,42 +1,36 @@
-import logger
-import unittest
+import commands
 import copy
 import datetime
-import time
-import string
-import random
-import logging
 import json
-import commands
-import mc_bin_client
+import logging
+import random
+import string
+import time
 import traceback
+import unittest
 
-
-from memcached.helper.data_helper import VBucketAwareMemcached
-from couchbase_helper.documentgenerator import BlobGenerator
+import logger
+import testconstants
+from TestInput import TestInputSingleton
+from couchbase_cli import CouchbaseCLI
 from couchbase_helper.cluster import Cluster
+from couchbase_helper.data_analysis_helper import *
 from couchbase_helper.document import View
+from couchbase_helper.documentgenerator import BlobGenerator
 from couchbase_helper.documentgenerator import DocumentGenerator
 from couchbase_helper.stats_tools import StatsCommon
-from TestInput import TestInputSingleton
-from membase.api.rest_client import RestConnection, Bucket, RestHelper
+from membase.api.exception import ServerUnavailableException
+from membase.api.rest_client import Bucket, RestHelper
 from membase.helper.bucket_helper import BucketOperationHelper
 from membase.helper.cluster_helper import ClusterOperationHelper
 from membase.helper.rebalance_helper import RebalanceHelper
-from memcached.helper.data_helper import MemcachedClientHelper
-from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
-from membase.api.exception import ServerUnavailableException
-from couchbase_helper.data_analysis_helper import *
-from testconstants import STANDARD_BUCKET_PORT
-from testconstants import MIN_COMPACTION_THRESHOLD
-from testconstants import MAX_COMPACTION_THRESHOLD
-from membase.helper.cluster_helper import ClusterOperationHelper
-from security.rbac_base import RbacBase
-
-from couchbase_cli import CouchbaseCLI
-import testconstants
-
+from memcached.helper.data_helper import VBucketAwareMemcached
+from remote.remote_util import RemoteUtilHelper
 from scripts.collect_server_info import cbcollectRunner
+from security.rbac_base import RbacBase
+from testconstants import MAX_COMPACTION_THRESHOLD
+from testconstants import MIN_COMPACTION_THRESHOLD
+from testconstants import STANDARD_BUCKET_PORT
 
 
 class BaseTestCase(unittest.TestCase):
@@ -612,7 +606,8 @@ class BaseTestCase(unittest.TestCase):
                 #except:
                     #print 'got a failure'
 
-    def _create_sasl_buckets(self, server, num_buckets, server_id=None, bucket_size=None, password='password'):
+    def _create_sasl_buckets(self, server, num_buckets, server_id=None,\
+                             bucket_size=None, password='password'):
         if not num_buckets:
             return
         if server_id is None:
@@ -620,6 +615,8 @@ class BaseTestCase(unittest.TestCase):
         if bucket_size is None:
             bucket_size = self.bucket_size
         bucket_tasks = []
+        if self.sasl_password != "password":
+            password = self.sasl_password
 
         bucket_params = copy.deepcopy(self.bucket_base_params['membase']['non_ephemeral'])
         bucket_params['size'] = bucket_size
@@ -632,15 +629,20 @@ class BaseTestCase(unittest.TestCase):
                 bucket_priority = self.get_bucket_priority(self.sasl_bucket_priority[i])
             bucket_params['bucket_priority'] = bucket_priority
 
-            bucket_tasks.append(self.cluster.async_create_sasl_bucket(name=name, password=self.sasl_password,
-                                                                      bucket_params=bucket_params))
-            self.buckets.append(Bucket(name=name, authType="sasl", saslPassword=self.sasl_password,
-                                       num_replicas=self.num_replicas, bucket_size=self.bucket_size,
-                                       master_id=server_id, eviction_policy=self.eviction_policy, lww=self.lww))
+            bucket_tasks.append(self.cluster.async_create_sasl_bucket(name=name,
+                                                        password=password,
+                                                        bucket_params=bucket_params))
+            self.buckets.append(Bucket(name=name, authType="sasl", saslPassword=password,
+                                                  num_replicas=self.num_replicas,
+                                                  bucket_size=self.bucket_size,
+                                                  master_id=server_id,
+                                                  eviction_policy=self.eviction_policy,
+                                                  lww=self.lww))
         for task in bucket_tasks:
             task.result(self.wait_timeout * 10)
         if self.enable_time_sync:
-            self._set_time_sync_on_buckets(['bucket' + str(i) for i in range(num_buckets)])
+            self._set_time_sync_on_buckets(['bucket' + str(i) \
+                                             for i in range(num_buckets)])
 
     def _create_standard_buckets(self, server, num_buckets, server_id=None, bucket_size=None):
         if not num_buckets:
@@ -654,13 +656,11 @@ class BaseTestCase(unittest.TestCase):
         bucket_params = copy.deepcopy(self.bucket_base_params['membase']['non_ephemeral'])
         bucket_params['size'] = bucket_size
         bucket_params['bucket_type'] = self.bucket_type
-
-        versions = RestConnection(server).get_nodes_versions()
-        pre_spock = False
-        for version in versions:
-            if "5" > version:
-                pre_spock = True
-
+        cluster_compatibility = RestConnection(server).check_cluster_compatibility("5.0")
+        if cluster_compatibility is None:
+            pre_spock = True
+        else:
+            pre_spock = not cluster_compatibility
         for i in range(num_buckets):
             name = 'standard_bucket' + str(i)
             port = STANDARD_BUCKET_PORT + i + 1
@@ -735,13 +735,11 @@ class BaseTestCase(unittest.TestCase):
 
         bucket_params = copy.deepcopy(self.bucket_base_params['memcached'])
         bucket_params['size'] = bucket_size
-
-        versions = RestConnection(server).get_nodes_versions()
-        pre_spock = False
-        for version in versions:
-            if "5" > version:
-                pre_spock = True
-
+        cluster_compatibility = RestConnection(server).check_cluster_compatibility("5.0")
+        if cluster_compatibility is None:
+            pre_spock = True
+        else:
+            pre_spock = not cluster_compatibility
         for i in range(num_buckets):
 
             name = 'memcached_bucket' + str(i)
@@ -1141,7 +1139,8 @@ class BaseTestCase(unittest.TestCase):
             if verify_total_items:
                 verified = True
                 for bucket in self.buckets:
-                    verified &= RebalanceHelper.wait_till_total_numbers_match(master, bucket)
+                    verified &= RebalanceHelper.wait_till_total_numbers_match(master, bucket,
+                                                                              timeout_in_seconds=(timeout or 500))
                 self.assertTrue(verified, "Lost items!!! Replication was completed but "
                                           "          sum(curr_items) don't match the curr_items_total")
         else:
@@ -2034,15 +2033,16 @@ class BaseTestCase(unittest.TestCase):
         if node is None:
             node = self.master
         rest = RestConnection(node)
-        versions = rest.get_nodes_versions()
-        if not versions:
+        cluster_compatibility = rest.check_cluster_compatibility("5.0")
+        if cluster_compatibility is None:
+            pre_spock = True
+        else:
+            pre_spock = not cluster_compatibility
+        if pre_spock:
+            self.log.info("Atleast one of the nodes in the cluster is "
+                          "pre 5.0 version. Hence not creating rbac user "
+                          "for the cluster. RBAC is a 5.0 feature.")
             return
-        for version in versions:
-            if "5" > version:
-                self.log.info("Atleast one of the nodes in the cluster is "
-                              "pre 5.0 version. Hence not creating rbac user "
-                              "for the cluster. RBAC is a 5.0 feature.")
-                return
         if testuser is None:
             testuser = [{'id': 'cbadminbucket', 'name': 'cbadminbucket',
                                                 'password': 'password'}]
@@ -2216,7 +2216,7 @@ class BaseTestCase(unittest.TestCase):
         else:
             list = []
             for server_info in self.services_map[service_type]:
-                tokens = server_info.split(":")
+                tokens = server_info.rsplit(":", 1)
                 ip = tokens[0]
                 port = int(tokens[1])
                 for server in servers:
@@ -2231,7 +2231,7 @@ class BaseTestCase(unittest.TestCase):
                         server.ip = hostname
                         shell.disconnect()
                     if (port != 8091 and port == int(server.port)) or \
-                            (port == 8091 and server.ip == ip):
+                            (port == 8091 and server.ip.lower() == ip.lower()):
                         list.append(server)
             self.log.info("list of all nodes in cluster: {0}".format(list))
             if get_all_nodes:

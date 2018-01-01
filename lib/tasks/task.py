@@ -1,36 +1,40 @@
-import os
-import time
-import logger
-import random
-import socket
-import string
 import copy
 import json
-import re
 import math
-import crc32
+import os
+import random
+import re
+import socket
+import string
+import time
 import traceback
-import testconstants
 from httplib import IncompleteRead
-from threading import Thread
-from memcacheConstants import ERR_NOT_FOUND,NotFoundError
-from membase.api.rest_client import RestConnection, Bucket, RestHelper
-from membase.api.exception import BucketCreationException
-from membase.helper.bucket_helper import BucketOperationHelper
-from memcached.helper.data_helper import KVStoreAwareSmartClient, MemcachedClientHelper
-from memcached.helper.kvstore import KVStore
-from couchbase_helper.document import DesignDocument, View
-from mc_bin_client import MemcachedError
-from tasks.future import Future
-from couchbase_helper.stats_tools import StatsCommon
-from membase.api.exception import N1QLQueryException, DropIndexException, CreateIndexException, DesignDocCreationException, QueryViewException, ReadDocumentException, RebalanceFailedException, \
-                                    GetBucketInfoFailed, CompactViewFailed, SetViewInfoNotFound, FailoverFailedException, \
-                                    ServerUnavailableException, BucketFlushFailed, CBRecoveryFailedException, BucketCompactionException, AutoFailoverException
-from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
-from couchbase_helper.documentgenerator import BatchedDocumentGenerator
-from TestInput import TestInputServer, TestInputSingleton
-from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA, COUCHBASE_FROM_4DOT6, THROUGHPUT_CONCURRENCY, ALLOW_HTP, CBAS_QUOTA, COUCHBASE_FROM_VERSION_4
 from multiprocessing import Process, Manager, Semaphore
+from threading import Thread
+
+import crc32
+import logger
+import testconstants
+from TestInput import TestInputServer, TestInputSingleton
+from couchbase_helper.document import DesignDocument
+from couchbase_helper.documentgenerator import BatchedDocumentGenerator
+from couchbase_helper.stats_tools import StatsCommon
+from mc_bin_client import MemcachedError
+from membase.api.exception import BucketCreationException
+from membase.api.exception import N1QLQueryException, DropIndexException, CreateIndexException, \
+    DesignDocCreationException, QueryViewException, ReadDocumentException, RebalanceFailedException, \
+    GetBucketInfoFailed, CompactViewFailed, SetViewInfoNotFound, FailoverFailedException, \
+    ServerUnavailableException, BucketFlushFailed, CBRecoveryFailedException, BucketCompactionException, \
+    AutoFailoverException
+from membase.api.rest_client import RestConnection, Bucket, RestHelper
+from membase.helper.bucket_helper import BucketOperationHelper
+from memcacheConstants import ERR_NOT_FOUND, NotFoundError
+from memcached.helper.data_helper import MemcachedClientHelper
+from memcached.helper.kvstore import KVStore
+from remote.remote_util import RemoteMachineShellConnection, RemoteUtilHelper
+from tasks.future import Future
+from testconstants import MIN_KV_QUOTA, INDEX_QUOTA, FTS_QUOTA, COUCHBASE_FROM_4DOT6, THROUGHPUT_CONCURRENCY, ALLOW_HTP, \
+    CBAS_QUOTA
 
 try:
     CHECK_FLAG = False
@@ -1278,9 +1282,9 @@ class ESRunQueryCompare(Task):
     def execute(self, task_manager):
         self.es_compare = True
         try:
-            self.log.info("---------------------------------------------------"
-                          "--------------- Query # %s -----------------------"
-                          "------------------------------------------"
+            self.log.info("---------------------------------------"
+                          "-------------- Query # %s -------------"
+                          "---------------------------------------"
                           % str(self.query_index+1))
             try:
                 fts_hits, fts_doc_ids, fts_time, fts_status = \
@@ -1313,10 +1317,10 @@ class ESRunQueryCompare(Task):
             except ServerUnavailableException:
                 self.log.error("ERROR: FTS Query timed out (client timeout=70s)!")
                 self.passed = False
-            if self.es and self.es_query['query']:
+            if self.es and self.es_query:
                 es_hits, es_doc_ids, es_time = self.run_es_query(self.es_query)
                 self.log.info("ES hits for query: %s on %s is %s (took %sms)" % \
-                              (json.dumps(self.es_query['query'],  ensure_ascii=False),
+                              (json.dumps(self.es_query,  ensure_ascii=False),
                                self.es_index_name,
                                es_hits,
                                es_time))

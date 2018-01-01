@@ -1,12 +1,5 @@
-
-import sys
-import urllib2
-import urllib
-import httplib2
 import json
 import string
-import time
-import ast
 from optparse import OptionParser
 
 
@@ -30,13 +23,19 @@ def main():
 
     print 'the ini file is', options.inifile
 
+    if not options.servers.startswith('['):
+        options.servers='['+options.servers+']'
     print 'the server info is', options.servers
 
-    servers = json.loads(options.servers)
     addPoolServers = []
 
-    if ast.literal_eval(options.addPoolServers) is not None:
+    if options.addPoolServers != None and options.addPoolServers != "None":
+        if not options.addPoolServers.startswith('['):
+            options.addPoolServers = '[' + options.addPoolServers + ']'
+        print 'the additional server pool info is', options.addPoolServers
         addPoolServers = json.loads(options.addPoolServers)
+
+    servers = json.loads(options.servers)
 
     f = open(options.inifile)
     data = f.readlines()

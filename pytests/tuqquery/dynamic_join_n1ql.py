@@ -1,8 +1,8 @@
 import copy
 import re
-from tuqquery.newtuq import QueryTests
-from couchbase_helper.documentgenerator import DocumentGenerator
 
+from couchbase_helper.documentgenerator import DocumentGenerator
+from tuqquery.tuq import QueryTests
 
 JOIN_INNER = "INNER"
 JOIN_LEFT = "LEFT"
