@@ -2302,15 +2302,15 @@ class RestConnection(object):
             settings.enabled = json_parsed["enabled"]
             settings.count = json_parsed["count"]
             settings.timeout = json_parsed["timeout"]
+            settings.failoverOnDataDiskIssuesEnabled = json_parsed["failoverOnDataDiskIssues"]["enabled"]
+            settings.failoverOnDataDiskIssuesTimeout = json_parsed["failoverOnDataDiskIssues"]["timePeriod"]
         return settings
 
-    def update_autofailover_settings(self, enabled, timeout):
-        if enabled:
-            params = urllib.urlencode({'enabled': 'true',
-                                       'timeout': timeout})
-        else:
-            params = urllib.urlencode({'enabled': 'false',
-                                       'timeout': timeout})
+    def update_autofailover_settings(self, enabled, timeout, enable_disk_failure=False, disk_timeout=120):
+        params = urllib.urlencode({'enabled': enabled.__str__().lower(),
+                                   'timeout': timeout,
+                                   'failoverOnDataDiskIssues[enabled]': enable_disk_failure.__str__().lower(),
+                                   'failoverOnDataDiskIssues[timePeriod]': disk_timeout})
         api = self.baseUrl + 'settings/autoFailover'
         log.info('settings/autoFailover params : {0}'.format(params))
         status, content, header = self._http_request(api, 'POST', params)
@@ -4327,7 +4327,8 @@ class AutoFailoverSettings(object):
         self.enabled = True
         self.timeout = 0
         self.count = 0
-
+        self.failoverOnDataDiskIssuesEnabled = False
+        self.failoverOnDataDiskIssuesTimeout = 0
 
 class AutoReprovisionSettings(object):
     def __init__(self):

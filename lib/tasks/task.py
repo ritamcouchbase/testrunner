@@ -1852,7 +1852,6 @@ class BatchedValidateDataTask(GenericLoadingTask):
 class VerifyRevIdTask(GenericLoadingTask):
     def __init__(self, src_server, dest_server, bucket, src_kv_store, dest_kv_store, max_err_count=200000, max_verify=None):
         GenericLoadingTask.__init__(self, src_server, bucket, src_kv_store)
-        from memcached.helper.data_helper import VBucketAwareMemcached as SmartClient
         self.client_src = SmartClient(RestConnection(src_server), bucket)
         self.client_dest = SmartClient(RestConnection(dest_server), bucket)
         self.src_valid_keys, self.src_deleted_keys = src_kv_store.key_set()
@@ -1972,7 +1971,6 @@ class VerifyRevIdTask(GenericLoadingTask):
 class VerifyMetaDataTask(GenericLoadingTask):
     def __init__(self, dest_server, bucket, kv_store, meta_data_store, max_err_count=100):
         GenericLoadingTask.__init__(self, dest_server, bucket, kv_store)
-        from memcached.helper.data_helper import VBucketAwareMemcached as SmartClient
         self.client = SmartClient(RestConnection(dest_server), bucket)
         self.valid_keys, self.deleted_keys = kv_store.key_set()
         self.num_valid_keys = len(self.valid_keys)
@@ -2050,7 +2048,6 @@ class VerifyMetaDataTask(GenericLoadingTask):
 class GetMetaDataTask(GenericLoadingTask):
     def __init__(self, dest_server, bucket, kv_store):
         GenericLoadingTask.__init__(self, dest_server, bucket, kv_store)
-        from memcached.helper.data_helper import VBucketAwareMemcached as SmartClient
         self.client = SmartClient(RestConnection(dest_server), bucket)
         self.valid_keys, self.deleted_keys = kv_store.key_set()
         self.num_valid_keys = len(self.valid_keys)
@@ -4667,7 +4664,8 @@ class CBASQueryExecuteTask(Task):
 class AutoFailoverNodesFailureTask(Task):
     def __init__(self, master, servers_to_fail, failure_type, timeout,
                  pause=0, expect_auto_failover=True, timeout_buffer=3,
-                 check_for_failover=True, failure_timers=None):
+                 check_for_failover=True, failure_timers=None,
+                 disk_timeout=0, disk_location=None, disk_size=200):
         Task.__init__(self, "AutoFailoverNodesFailureTask")
         self.master = master
         self.servers_to_fail = servers_to_fail
@@ -4683,6 +4681,9 @@ class AutoFailoverNodesFailureTask(Task):
         self.current_failure_node = self.servers_to_fail[0]
         self.max_time_to_wait_for_failover = self.timeout + \
                                              self.timeout_buffer + 60
+        self.disk_timeout = disk_timeout
+        self.disk_location = disk_location
+        self.disk_size = disk_size
         if failure_timers is None:
             failure_timers = []
         self.failure_timers = failure_timers
@@ -4708,7 +4709,7 @@ class AutoFailoverNodesFailureTask(Task):
             self.state = EXECUTING
             return
         rest = RestConnection(self.master)
-        max_timeout = self.timeout + self.timeout_buffer
+        max_timeout = self.timeout + self.timeout_buffer + self.disk_timeout
         if self.start_time == 0:
             message = "Did not inject failure in the system."
             rest.print_UI_logs(10)
@@ -4825,6 +4826,10 @@ class AutoFailoverNodesFailureTask(Task):
             self._block_incoming_network_from_node(self.servers_to_fail[0],
                                                    self.servers_to_fail[
                                                        self.itr + 1])
+        elif self.failure_type == "disk_failure":
+            self._fail_disk(self.current_failure_node)
+        elif self.failure_type == "disk_full":
+            self._disk_full_failure(self.current_failure_node)
             self.itr += 1
         self.log.info("Start time = {}".format(time.ctime(self.start_time)))
         self.itr += 1
@@ -4909,6 +4914,52 @@ class AutoFailoverNodesFailureTask(Task):
         command = "iptables -A INPUT -s {0} -j DROP".format(node2.ip)
         shell.execute_command(command)
         self.start_time = time.time()
+
+    def _fail_disk(self, node):
+        shell = RemoteMachineShellConnection(node)
+        output, error = shell.unmount_partition(self.disk_location)
+        success = True
+        if output:
+            for line in output:
+                if self.disk_location in line:
+                    success = False
+        if success:
+            self.log.info("Unmounted disk at location : {0} on {1}".format(self.disk_location, node.ip))
+            self.start_time = time.time()
+        else:
+            self.log.info("Could not fail the disk at {0} on {1}".format(self.disk_location, node.ip))
+            self.state = FINISHED
+            self.set_exception(Exception("Could not fail the disk at {0} on {1}".format(self.disk_location, node.ip)))
+            self.set_result(False)
+
+    def _recover_disk(self, node):
+        shell = RemoteMachineShellConnection(node)
+        o,r = shell.mount_partition(self.disk_location)
+        o,r = shell.get_disk_info()
+        for line in o:
+            if self.disk_location in line:
+                self.log.info("Mounted disk at location : {0} on {1}".format(self.disk_location, node.ip))
+                return
+        self.set_exception(Exception("Could not mount disk at location {0} on {1}".format(self.disk_location, node.ip)))
+        raise Exception()
+
+    def _disk_full_failure(self, node):
+        shell = RemoteMachineShellConnection(node)
+        disk_location = "/".join(self.disk_location.split("/")[:-1])
+        output, error = shell.fill_disk_space(self.disk_location, self.disk_size)
+        success = False
+        if output:
+            for line in output:
+                if self.disk_location in line:
+                    if "0 100% {0}".format(self.disk_location) in line:
+                        success = True
+        if success:
+            self.log.info("Filled up disk Space at {0} on {1}".format(disk_location, node.ip))
+            self.start_time = time.time()
+        else:
+            self.log.info("Could not fill the disk at {0} on {1}".format(self.disk_location, node.ip))
+            self.state = FINISHED
+            self.set_exception(Exception("Could not fill the disk at {0} on {1}".format(self.disk_location, node.ip)))
 
     def _check_for_autofailover_initiation(self, failed_over_node):
         rest = RestConnection(self.master)

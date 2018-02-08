@@ -3358,8 +3358,7 @@ class RemoteMachineShellConnection:
         else:
             o, r = self.execute_command("rm -rf {0}/*".format(data_path))
             self.log_command_output(o, r)
-            o, r = self.execute_command("rm -rf {0}/*"\
-                                             .format(data_path.replace("data","config")))
+            o, r = self.execute_command("rm -rf /opt/couchbase/var/lib/couchbase/config/*")
             self.log_command_output(o, r)
 
     def stop_couchbase(self):
@@ -4447,6 +4446,55 @@ class RemoteMachineShellConnection:
         self.sleep(5, "==== delay kill pid %d in 5 seconds to printout message ==="\
                                                                       % os.getpid())
         os.system('kill %d' % os.getpid())
+
+    def give_directory_permissions_to_couchbase(self, location):
+        command = "chown 'couchbase' {0}".format(location)
+        output, error = self.execute_command(command)
+        command = "chmod 777 {0}".format(location)
+        output, error = self.execute_command(command)
+
+    def create_new_partition(self, location, size=None):
+        command = "umount -l {0}".format(location)
+        output, error = self.execute_command(command)
+        command = "rm -rf {0}".format(location)
+        output, error = self.execute_command(command)
+        command = "rm -rf /usr/disk-img/disk-quota.ext3"
+        output, error = self.execute_command(command)
+        command = "mkdir -p {0}".format(location)
+        output, error = self.execute_command(command)
+        if size:
+            count = (size * 1024 * 1024) / 512
+        else:
+            count = (5 * 1024 * 1024 * 1024) / 512
+        command = "mkdir -p /usr/disk-img"
+        output, error = self.execute_command(command)
+        command = "dd if=/dev/zero of=/usr/disk-img/disk-quota.ext3 count={0}".format(count)
+        output, error = self.execute_command(command)
+        command = "/sbin/mkfs -t ext3 -q /usr/disk-img/disk-quota.ext3 -F"
+        output, error = self.execute_command(command)
+        command = "mount -o loop,rw,usrquota,grpquota /usr/disk-img/disk-quota.ext3 {0}".format(location)
+        output, error = self.execute_command(command)
+        command = "chown 'couchbase' {0}".format(location)
+        output, error = self.execute_command(command)
+        command = "chmod 777 {0}".format(location)
+        output, error = self.execute_command(command)
+
+    def mount_partition(self, location, size_limited=False):
+        command = "mount -o loop,rw,usrquota,grpquota /usr/disk-img/disk-quota.ext3 {0}; df -Th".format(location)
+        output, error = self.execute_command(command)
+        return output, error
+
+    def unmount_partition(self, location):
+        command = "umount -l {0}; df -Th".format(location)
+        output, error = self.execute_command(command)
+        return output, error
+
+    def fill_disk_space(self, location, size):
+        count = (size * 1024 * 1024) / 512
+        command = "dd if=/dev/zero of={0}/disk-quota.ext3 count={1}; df -Th".format(location, count)
+        output, error = self.execute_command(command)
+        return output, error
+
 
 class RemoteUtilHelper(object):
 
