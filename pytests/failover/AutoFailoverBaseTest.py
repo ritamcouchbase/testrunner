@@ -588,7 +588,7 @@ class DiskAutoFailoverBasetest(AutoFailoverBaseTest):
                                             self.timeout_buffer,
                                             failure_timers=node_down_timer_tasks,
                                             disk_timeout=self.disk_timeout,
-                                            disk_location=self.data_location,
+                                            disk_location=self.disk_location,
                                             disk_size=self.disk_location_size)
         for node_down_timer_task in node_down_timer_tasks:
             self.node_failure_task_manager.schedule(node_down_timer_task, 2)
