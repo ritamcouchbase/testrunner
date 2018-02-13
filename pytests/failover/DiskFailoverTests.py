@@ -36,7 +36,6 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         self.failover_expected = True
         self.failover_actions[self.failover_action]()
         for task in tasks:
-            task.state = 'FINISHED'
             task.set_result(True)
             task.result()
         self.disable_disk_autofailover_and_validate()
@@ -48,7 +47,8 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         self.failover_expected = (not self.failover_action == "disk_full")
         self.failover_actions[self.failover_action]()
         for task in tasks:
-            task.state = 'FINISHED'
+            task.set_result(True)
+            task.result()
         self.disable_disk_autofailover_and_validate()
         self.disable_autofailover_and_validate()
 
