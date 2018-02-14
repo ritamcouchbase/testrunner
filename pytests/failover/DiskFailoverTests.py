@@ -15,6 +15,13 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
     def tearDown(self):
         super(DiskAutofailoverTests, self).tearDown()
 
+    def _loadgen(self):
+        tasks = []
+        tasks.extend(self._async_load_all_buckets(self.master, self.run_time_create_load_gen, "create", 0))
+        tasks.extend(self._async_load_all_buckets(self.master, self.update_load_gen, "update", 0))
+        tasks.extend(self._async_load_all_buckets(self.master, self.delete_load_gen, "deletes", 0))
+        return tasks
+
     def test_disk_autofailover_rest_api(self):
         disk_timeouts = self.input.param("disk_failover_timeouts", "5,10,30,60,120")
         disk_timeouts = disk_timeouts.split(",")
@@ -29,10 +36,7 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
 
     def test_disk_failure_for_writes(self):
         self.enable_disk_autofailover_and_validate()
-        tasks = []
-        tasks.append(self._async_load_all_buckets(self.master, self.run_time_create_load_gen, "create", 0))
-        tasks.append(self._async_load_all_buckets(self.master, self.update_load_gen, "update", 0))
-        tasks.append(self._async_load_all_buckets(self.master, self.delete_load_gen, "deletes", 0))
+        tasks = self._loadgen()
         self.failover_expected = True
         self.failover_actions[self.failover_action]()
         for task in tasks:
@@ -54,12 +58,12 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
 
     def test_disk_failure_for_read_and_writes(self):
         self.enable_disk_autofailover_and_validate()
-        self._async_load_all_buckets(self.master, self.run_time_create_load_gen, "create", 0)
-        self._async_load_all_buckets(self.master, self.update_load_gen, "update", 0)
-        self._async_load_all_buckets(self.master, self.delete_load_gen, "deletes", 0)
-        self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0)
+        tasks = self._loadgen()
         self.failover_expected = True
         self.failover_actions[self.failover_action]()
+        for task in tasks:
+            task.set_result(True)
+            task.result()
         self.disable_disk_autofailover_and_validate()
         self.disable_autofailover_and_validate()
 
