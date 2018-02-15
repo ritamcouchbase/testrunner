@@ -19,7 +19,7 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         tasks = []
         tasks.extend(self._async_load_all_buckets(self.master, self.run_time_create_load_gen, "create", 0))
         tasks.extend(self._async_load_all_buckets(self.master, self.update_load_gen, "update", 0))
-        tasks.extend(self._async_load_all_buckets(self.master, self.delete_load_gen, "deletes", 0))
+        tasks.extend(self._async_load_all_buckets(self.master, self.delete_load_gen, "delete", 0))
         return tasks
 
     def test_disk_autofailover_rest_api(self):
