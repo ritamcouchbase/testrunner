@@ -483,6 +483,7 @@ class DiskAutoFailoverBasetest(AutoFailoverBaseTest):
         self.disk_location_size = self.input.param("data_location_size", None)
         self.data_location = "{0}/data".format(self.disk_location)
         self.disk_timeout = self.input.param("disk_timeout", 120)
+        self.read_loadgen = self.input.param("read_loadgen", False)
         self.log.info("Cleanup the cluster and set the data location to the one specified by the test.")
         for server in self.servers:
             self._create_data_locations(server)
@@ -501,6 +502,8 @@ class DiskAutoFailoverBasetest(AutoFailoverBaseTest):
                                self.servers[1:self.nodes_init],
                                [], services=self.services)
         self.add_built_in_server_user(node=self.master)
+        if self.read_loadgen:
+            self.bucket_size = 100
         super(DiskAutoFailoverBasetest,self)._bucket_creation()
         self._load_all_buckets(self.servers[0], self.initial_load_gen,
                                "create", 0)
@@ -509,12 +512,13 @@ class DiskAutoFailoverBasetest(AutoFailoverBaseTest):
         self.log.info("=============Finished Diskautofailover base setup=============")
 
     def tearDown(self):
+        self.log.info("=============Starting Diskautofailover teardown ==============")
         self.targetMaster = True
-        self.reset_cluster()
         if hasattr(self, "original_data_path"):
+            self.reset_cluster()
             for server in self.servers:
                 self._initialize_node_with_new_data_location(server, self.original_data_path)
-        super(DiskAutoFailoverBasetest, self).tearDown()
+        self.log.info("=============Finished Diskautofailover teardown ==============")
 
     def enable_disk_autofailover(self):
         status = self.rest.update_autofailover_settings(True, self.timeout, True, self.disk_timeout)
@@ -622,6 +626,32 @@ class DiskAutoFailoverBasetest(AutoFailoverBaseTest):
 
     def bring_back_failed_nodes_up(self):
         if self.failover_action == "disk_failure":
-            pass
+            task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                                self.server_to_fail,
+                                                "recover_disk_failure", self.timeout,
+                                                self.pause_between_failover_action,
+                                                False,
+                                                self.timeout_buffer,
+                                                disk_timeout=self.disk_timeout, disk_location=self.disk_location,
+                                                disk_size=self.disk_location_size)
+            self.task_manager.schedule(task)
+            try:
+                task.result()
+            except Exception, e:
+                self.fail("Exception: {}".format(e))
+        elif self.failover_action == "disk_full":
+            task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                                self.server_to_fail,
+                                                "recover_disk_full_failure", self.timeout,
+                                                self.pause_between_failover_action,
+                                                False,
+                                                self.timeout_buffer,
+                                                disk_timeout=self.disk_timeout, disk_location=self.disk_location,
+                                                disk_size=self.disk_location_size)
+            self.task_manager.schedule(task)
+            try:
+                task.result()
+            except Exception, e:
+                self.fail("Exception: {}".format(e))
         else:
             super(DiskAutoFailoverBasetest, self).bring_back_failed_nodes_up()

@@ -4826,11 +4826,15 @@ class AutoFailoverNodesFailureTask(Task):
             self._block_incoming_network_from_node(self.servers_to_fail[0],
                                                    self.servers_to_fail[
                                                        self.itr + 1])
+            self.itr += 1
         elif self.failure_type == "disk_failure":
             self._fail_disk(self.current_failure_node)
         elif self.failure_type == "disk_full":
             self._disk_full_failure(self.current_failure_node)
-            self.itr += 1
+        elif self.failure_type == "recover_disk_failure":
+            self._recover_disk(self.current_failure_node)
+        elif self.failure_type == "recover_disk_full_failure":
+            self._recover_disk_full_failure(self.current_failure_node)
         self.log.info("Start time = {}".format(time.ctime(self.start_time)))
         self.itr += 1
 
@@ -4945,7 +4949,6 @@ class AutoFailoverNodesFailureTask(Task):
 
     def _disk_full_failure(self, node):
         shell = RemoteMachineShellConnection(node)
-        disk_location = "/".join(self.disk_location.split("/")[:-1])
         output, error = shell.fill_disk_space(self.disk_location, self.disk_size)
         success = False
         if output:
@@ -4954,12 +4957,20 @@ class AutoFailoverNodesFailureTask(Task):
                     if "0 100% {0}".format(self.disk_location) in line:
                         success = True
         if success:
-            self.log.info("Filled up disk Space at {0} on {1}".format(disk_location, node.ip))
+            self.log.info("Filled up disk Space at {0} on {1}".format(self.disk_location, node.ip))
             self.start_time = time.time()
         else:
             self.log.info("Could not fill the disk at {0} on {1}".format(self.disk_location, node.ip))
             self.state = FINISHED
             self.set_exception(Exception("Could not fill the disk at {0} on {1}".format(self.disk_location, node.ip)))
+
+    def _recover_disk_full_failure(self, node):
+        shell =  RemoteMachineShellConnection(node)
+        delete_file = "{0}/disk-quota.ext3".format(self.disk_location)
+        output, error = shell.execute_command("rm -f {0}".format(delete_file))
+        self.log.info(output)
+        if error:
+            self.log.info(error)
 
     def _check_for_autofailover_initiation(self, failed_over_node):
         rest = RestConnection(self.master)

@@ -4495,7 +4495,6 @@ class RemoteMachineShellConnection:
         output, error = self.execute_command(command)
         return output, error
 
-
 class RemoteUtilHelper(object):
 
     @staticmethod
