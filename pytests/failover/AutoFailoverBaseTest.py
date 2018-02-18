@@ -566,7 +566,7 @@ class DiskAutoFailoverBasetest(AutoFailoverBaseTest):
         cli = CouchbaseCLI(server, server.rest_username, server.rest_password)
         output, error, status = cli.node_init(data_location, None, None)
         self.log.info(output)
-        if error:
+        if error or "ERROR" in output:
             self.log.info(error)
             self.fail("Failed to set new data location. Check error message.")
         init_tasks.append(self.cluster.async_init_node(server, self.disabled_consistent_view,
