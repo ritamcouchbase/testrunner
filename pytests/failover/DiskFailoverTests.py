@@ -88,7 +88,7 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
                                                       self.servers_to_remove)
         self.sleep(5)
         self.failover_expected = True
-        self.failover_actions[self.failover_action](self)
+        self.failover_actions[self.failover_action]()
         try:
             rebalance_task.result()
         except RebalanceFailedException:
@@ -126,7 +126,7 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         if not rebalance_success:
             self.disable_firewall()
             self.fail("Rebalance failed. Check logs")
-        self.failover_actions[self.failover_action](self)
+        self.failover_actions[self.failover_action]()
         for task in tasks:
             task.set_result(True)
             task.result()
@@ -147,7 +147,7 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         self.sleep(5)
         tasks = self._loadgen()
         tasks.extend(self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0))
-        self.failover_actions[self.failover_action](self)
+        self.failover_actions[self.failover_action]()
         for node in self.servers_to_add:
             self.rest.add_node(user=self.orchestrator.rest_username,
                                password=self.orchestrator.rest_password,
@@ -183,7 +183,7 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         self.sleep(5)
         tasks = self._loadgen()
         tasks.extend(self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0))
-        self.failover_actions[self.failover_action](self)
+        self.failover_actions[self.failover_action]()
         self.bring_back_failed_nodes_up()
         self.sleep(30)
         self.log.info(self.server_to_fail[0])
@@ -218,7 +218,7 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         self.sleep(5)
         tasks = self._loadgen()
         tasks.extend(self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0))
-        self.failover_actions[self.failover_action](self)
+        self.failover_actions[self.failover_action]()
         self.nodes = self.rest.node_statuses()
         self.remove_after_failover = True
         self.rest.rebalance(otpNodes=[node.id for node in self.nodes])
