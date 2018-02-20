@@ -79,7 +79,7 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
 
         :return: Nothing
         """
-        self.enable_autofailover_and_validate()
+        self.enable_disk_autofailover_and_validate()
         self.sleep(5)
         tasks = self._loadgen()
         tasks.extend(self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0))
@@ -103,6 +103,7 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
             for task in tasks:
                 task.set_result(True)
                 task.result()
+        self.disable_disk_autofailover_and_validate()
         self.disable_autofailover_and_validate()
 
     def test_disk_autofailover_after_rebalance(self):
@@ -116,7 +117,7 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         4. Disable autofailover and validate.
         :return: Nothing
         """
-        self.enable_autofailover_and_validate()
+        self.enable_disk_autofailover_and_validate()
         self.sleep(5)
         tasks = self._loadgen()
         tasks.extend(self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0))
@@ -130,6 +131,7 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         for task in tasks:
             task.set_result(True)
             task.result()
+        self.disable_disk_autofailover_and_validate()
         self.disable_autofailover_and_validate()
 
     def test_rebalance_after_disk_autofailover(self):
@@ -143,7 +145,7 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         4. Disable autofailover and validate.
         :return: Nothing
         """
-        self.enable_autofailover_and_validate()
+        self.enable_disk_autofailover_and_validate()
         self.sleep(5)
         tasks = self._loadgen()
         tasks.extend(self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0))
@@ -166,6 +168,8 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         for task in tasks:
             task.set_result(True)
             task.result()
+        self.disable_disk_autofailover_and_validate()
+        self.disable_autofailover_and_validate()
 
     def test__disk_autofailover_and_addback_of_node(self):
         """
@@ -179,7 +183,7 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
             self.log.info("Since no failover is expected in the test, "
                           "skipping the test")
             return
-        self.enable_autofailover_and_validate()
+        self.enable_disk_autofailover_and_validate()
         self.sleep(5)
         tasks = self._loadgen()
         tasks.extend(self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0))
@@ -200,6 +204,8 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         for task in tasks:
             task.set_result(True)
             task.result()
+        self.disable_disk_autofailover_and_validate()
+        self.disable_autofailover_and_validate()
 
     def test_disk_autofailover_and_remove_failover_node(self):
         """
@@ -214,7 +220,7 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
             self.log.info("Since no failover is expected in the test, "
                           "skipping the test")
             return
-        self.enable_autofailover_and_validate()
+        self.enable_disk_autofailover_and_validate()
         self.sleep(5)
         tasks = self._loadgen()
         tasks.extend(self._async_load_all_buckets(self.master, self.initial_load_gen, "read", 0))
@@ -228,3 +234,5 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
         for task in tasks:
             task.set_result(True)
             task.result()
+        self.disable_disk_autofailover_and_validate()
+        self.disable_autofailover_and_validate()
