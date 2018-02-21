@@ -106,7 +106,9 @@ class AutoFailoverBaseTest(BaseTestCase):
         False
         """
         status = self.rest.update_autofailover_settings(True,
-                                                        self.timeout)
+                                                        self.timeout,
+                                                        maxCount=self.max_count,
+                                                        enableServerGroup=self.server_group_failover)
         return status
 
     def disable_autofailover(self):
@@ -411,6 +413,8 @@ class AutoFailoverBaseTest(BaseTestCase):
         :return:  Nothing
         """
         self.timeout = self.input.param("timeout", 60)
+        self.max_count = self.input.param("maxCount", 1)
+        self.server_group_failover = self.input.param("serverGroupFailover", False)
         self.failover_action = self.input.param("failover_action",
                                                 "stop_server")
         self.failover_orchestrator = self.input.param("failover_orchestrator",
@@ -521,7 +525,9 @@ class DiskAutoFailoverBasetest(AutoFailoverBaseTest):
         self.log.info("=============Finished Diskautofailover teardown ==============")
 
     def enable_disk_autofailover(self):
-        status = self.rest.update_autofailover_settings(True, self.timeout, True, self.disk_timeout)
+        status = self.rest.update_autofailover_settings(True, self.timeout, True, self.disk_timeout,
+                                                        maxCount=self.max_count,
+                                                        enableServerGroup=self.server_group_failover)
         return status
 
     def enable_disk_autofailover_and_validate(self):
