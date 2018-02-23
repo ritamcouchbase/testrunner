@@ -2315,7 +2315,7 @@ class RestConnection(object):
                                    'failoverOnDataDiskIssues[enabled]': enable_disk_failure.__str__().lower(),
                                    'failoverOnDataDiskIssues[timePeriod]': disk_timeout,
                                    'maxCount': maxCount,
-                                   'failoverServerGroup': enableServerGroup})
+                                   'failoverServerGroup': enableServerGroup.__str__().lower()})
         api = self.baseUrl + 'settings/autoFailover'
         log.info('settings/autoFailover params : {0}'.format(params))
         status, content, header = self._http_request(api, 'POST', params)

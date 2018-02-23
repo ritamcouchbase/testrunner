@@ -99,6 +99,50 @@ class AutoFailoverBaseTest(BaseTestCase):
             self.node_monitor_task.stop = True
         self.task_manager.shutdown(force=True)
 
+    def shuffle_nodes_between_zones_and_rebalance(self, to_remove=None):
+        """
+        Shuffle the nodes present in the cluster if zone > 1. Rebalance the nodes in the end.
+        Nodes are divided into groups iteratively i.e. 1st node in Group 1, 2nd in Group 2, 3rd in Group 1 and so on, when
+        zone=2.
+        :param to_remove: List of nodes to be removed.
+        """
+        if not to_remove:
+            to_remove = []
+        serverinfo = self.orchestrator
+        rest = RestConnection(serverinfo)
+        zones = ["Group 1"]
+        nodes_in_zone = {"Group 1": [serverinfo.ip]}
+        # Create zones, if not existing, based on params zone in test.
+        # Shuffle the nodes between zones.
+        if int(self.zone) > 1:
+            for i in range(1, int(self.zone)):
+                a = "Group "
+                zones.append(a + str(i + 1))
+                if not rest.is_zone_exist(zones[i]):
+                    rest.add_zone(zones[i])
+                nodes_in_zone[zones[i]] = []
+            # Divide the nodes between zones.
+            nodes_in_cluster = [node.ip for node in self.get_nodes_in_cluster()]
+            nodes_to_remove = [node.ip for node in to_remove]
+            for i in range(1, len(self.servers)):
+                if self.servers[i].ip in nodes_in_cluster and self.servers[i].ip not in nodes_to_remove:
+                    server_group = i % int(self.zone)
+                    nodes_in_zone[zones[server_group]].append(self.servers[i].ip)
+            # Shuffle the nodesS
+            for i in range(1, self.zone):
+                node_in_zone = list(set(nodes_in_zone[zones[i]]) -
+                                    set([node  for node in rest.get_nodes_in_zone(zones[i])]))
+                rest.shuffle_nodes_in_zones(node_in_zone, zones[0], zones[i])
+        self.zones = nodes_in_zone
+        otpnodes = [node.id for node in rest.node_statuses()]
+        nodes_to_remove = [node.id for node in rest.node_statuses() if node.ip in [t.ip for t in to_remove]]
+        # Start rebalance and monitor it.
+        started = rest.rebalance(otpNodes=otpnodes, ejectedNodes=nodes_to_remove)
+        if started:
+            result = rest.monitorRebalance()
+            msg = "successfully rebalanced cluster {0}"
+            self.log.info(msg.format(result))
+
     def enable_autofailover(self):
         """
         Enable the autofailover setting with the given timeout.
@@ -439,9 +483,12 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.remove_after_failover = self.input.param(
             "remove_after_failover", False)
         self.timeout_buffer = 120 if self.failover_orchestrator else 3
-        failover_not_expected = self.num_node_failures > 1 and \
-                                self.pause_between_failover_action < \
-                                self.timeout or self.num_replicas < 1
+        failover_not_expected = (self. max_count == 1 and self.num_node_failures > 1 and
+                                self.pause_between_failover_action <
+                                self.timeout or self.num_replicas < 1)
+        failover_not_expected = failover_not_expected or (1 < self.max_count < self.num_node_failures and
+                                                          self.pause_between_failover_action < self.timeout or
+                                                          self.num_replicas < self.max_count)
         self.failover_expected = not failover_not_expected
         if self.failover_action is "restart_server":
             self.num_items *= 100

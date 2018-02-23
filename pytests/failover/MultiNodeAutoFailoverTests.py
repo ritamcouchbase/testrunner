@@ -21,9 +21,31 @@ class MultiNodeAutoFailoverTests(AutoFailoverBaseTest):
         """
         self.enable_autofailover_and_validate()
         self.sleep(5)
-        self.failover_expected = True
-        self.failover_actions[self.failover_action](self)
+        servers_to_fail = self.server_to_fail
+        for i in range(self.max_count):
+            self.server_to_fail = [servers_to_fail[i]]
+            self.failover_expected = True
+            self.failover_actions[self.failover_action](self)
+            self.sleep(self.timeout)
         self.disable_autofailover_and_validate()
+
+    def _get_server_group_nodes(self, server_group):
+        servers_in_group = self.zones[server_group]
+        server_group_nodes = []
+        for server in self.servers:
+            if server.ip in servers_in_group:
+                server_group_nodes.append(server)
+        return server_group_nodes
+
+    def test_autofailover_for_server_group(self):
+        self.enable_autofailover_and_validate()
+        self.shuffle_nodes_between_zones_and_rebalance()
+        servers_to_fail = self._get_server_group_nodes("Group 2")
+        for server in servers_to_fail:
+            self.server_to_fail = [server]
+            self.failover_expected = True
+            self.failover_actions[self.failover_action](self)
+
 
     def test_autofailover_during_rebalance(self):
         """
