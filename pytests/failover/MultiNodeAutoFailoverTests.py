@@ -24,7 +24,6 @@ class MultiNodeAutoFailoverTests(AutoFailoverBaseTest):
         servers_to_fail = self.server_to_fail
         for i in range(self.max_count):
             self.server_to_fail = [servers_to_fail[i]]
-            self.failover_expected = True
             self.failover_actions[self.failover_action](self)
             self.sleep(self.timeout)
         self.disable_autofailover_and_validate()
