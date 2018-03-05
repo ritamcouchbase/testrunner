@@ -11,6 +11,14 @@ class MultiNodeAutoFailoverTests(AutoFailoverBaseTest):
     def tearDown(self):
         super(MultiNodeAutoFailoverTests, self).tearDown()
 
+    def _is_failover_expected(self, failure_node_number):
+        failover_not_expected = (self.max_count == 1 and failure_node_number > 1 and
+                                 self.pause_between_failover_action <
+                                 self.timeout or self.num_replicas < 1)
+        failover_not_expected = failover_not_expected or (1 < self.max_count < failure_node_number and
+                                                          self.pause_between_failover_action < self.timeout or
+                                                          self.num_replicas < failure_node_number)
+        return not failover_not_expected
     def test_autofailover(self):
         """
         Test the basic autofailover for different failure scenarios.
@@ -24,6 +32,7 @@ class MultiNodeAutoFailoverTests(AutoFailoverBaseTest):
         servers_to_fail = self.server_to_fail
         for i in range(self.max_count):
             self.server_to_fail = [servers_to_fail[i]]
+            self.failover_expected = self._is_failover_expected(i + 1)
             self.failover_actions[self.failover_action](self)
             self.sleep(self.timeout)
         self.disable_autofailover_and_validate()
