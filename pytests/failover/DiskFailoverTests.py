@@ -1,11 +1,11 @@
 from couchbase_helper.documentgenerator import BlobGenerator
-from failover.AutoFailoverBaseTest import DiskAutoFailoverBasetest
+from failover.AutoFailoverBaseTest import AutoFailoverBaseTest
 from membase.api.exception import RebalanceFailedException, ServerUnavailableException
 
 
-class DiskAutofailoverTests(DiskAutoFailoverBasetest):
+class DiskAutofailoverTests(AutoFailoverBaseTest):
     def setUp(self):
-        super(DiskAutofailoverTests, self).setUp()
+        super(AutoFailoverBaseTest, self).setUp()
         self.run_time_create_load_gen = BlobGenerator('auto-failover',
                                                       'auto-failover-',
                                                       self.value_size,
@@ -13,7 +13,7 @@ class DiskAutofailoverTests(DiskAutoFailoverBasetest):
                                                       end=self.num_items * 10)
 
     def tearDown(self):
-        super(DiskAutofailoverTests, self).tearDown()
+        super(AutoFailoverBaseTest, self).tearDown()
 
     def _loadgen(self):
         tasks = []

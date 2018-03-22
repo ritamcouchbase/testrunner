@@ -275,6 +275,41 @@ class AutoFailoverBaseTest(BaseTestCase):
         self.assertFalse(settings.enabled, "Failed to disable "
                                            "autofailover_settings!")
 
+    def enable_disk_autofailover(self):
+        status = self.rest.update_autofailover_settings(True, self.timeout, True, self.disk_timeout,
+                                                        maxCount=self.max_count,
+                                                        enableServerGroup=self.server_group_failover)
+        return status
+
+    def enable_disk_autofailover_and_validate(self):
+        status = self.enable_disk_autofailover()
+        self.assertTrue(status, "Failed to enable disk autofailover for the cluster")
+        self.sleep(5)
+        settings = self.rest.get_autofailover_settings()
+        self.assertTrue(settings.enabled, "Failed to enable "
+                                          "autofailover_settings!")
+        self.assertEqual(self.timeout, settings.timeout,
+                         "Incorrect timeout set. Expected timeout : {0} "
+                         "Actual timeout set : {1}".format(self.timeout,
+                                                           settings.timeout))
+        self.assertTrue(settings.failoverOnDataDiskIssuesEnabled, "Failed to enable disk autofailover for the cluster")
+        self.assertEqual(self.disk_timeout, settings.failoverOnDataDiskIssuesTimeout,
+                         "Incorrect timeout period for disk failover set. Expected Timeout: {0} "
+                         "Actual timeout: {1}".format(self.disk_timeout, settings.failoverOnDataDiskIssuesTimeout))
+
+    def disable_disk_autofailover(self, disable_autofailover=False):
+        status = self.rest.update_autofailover_settings(not disable_autofailover, self.timeout, False,
+                                                        self.disk_timeout)
+        return status
+
+    def disable_disk_autofailover_and_validate(self, disable_autofailover=False):
+        status = self.disable_disk_autofailover(disable_autofailover)
+        self.assertTrue(status, "Failed to update autofailover settings. Failed to disable disk failover settings")
+        settings = self.rest.get_autofailover_settings()
+        self.assertEqual(not disable_autofailover, settings.enabled, "Failed to update autofailover settings.")
+        self.assertFalse(settings.failoverOnDataDiskIssuesEnabled, "Failed to disable disk autofailover for the "
+                                                                   "cluster")
+
     def start_node_monitors_task(self):
         """
         Start the node monitors task to analyze the node status monitors.
@@ -508,15 +543,87 @@ class AutoFailoverBaseTest(BaseTestCase):
             self.fail("Exception: {}".format(e))
         self.disable_firewall()
 
+    def fail_disk_via_disk_failure(self, async=False):
+        task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                            self.server_to_fail,
+                                            "disk_failure", self.timeout,
+                                            self.node_failure_task_manager,
+                                            self.failure_timer_task_manager,
+                                            self.failover_expected,
+                                            self.timeout_buffer,
+                                            check_for_failover=True,
+                                            disk_timeout=self.disk_timeout,
+                                            disk_location=self.disk_location,
+                                            disk_size=self.disk_location_size)
+        self.task_manager.schedule(task)
+        if async:
+            return task
+        try:
+            task.result()
+        except Exception, e:
+            self.fail("Exception: {}".format(e))
+
+    def fail_disk_via_disk_full(self, async=False):
+        task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                            self.server_to_fail,
+                                            "disk_full", self.timeout,
+                                            self.node_failure_task_manager,
+                                            self.failure_timer_task_manager,
+                                            expect_auto_failover=self.failover_expected,
+                                            timeout_buffer=self.timeout_buffer,
+                                            disk_timeout=self.disk_timeout, disk_location=self.disk_location,
+                                            disk_size=self.disk_location_size)
+        self.task_manager.schedule(task)
+        if async:
+            return task
+        try:
+            task.result()
+        except Exception, e:
+            self.fail("Exception: {}".format(e))
+
     def bring_back_failed_nodes_up(self):
         """
         Bring back the failed nodes.
         :return: Nothing
         """
-        if self.failover_action == "firewall":
-            self.disable_firewall()
-        elif self.failover_action == "stop_server":
-            self.start_couchbase_server()
+        if self.failover_action == "disk_failure":
+            task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                                self.server_to_fail,
+                                                "recover_disk_failure",
+                                                self.timeout,
+                                                self.node_failure_task_manager,
+                                                self.failure_timer_task_manager,
+                                                expect_auto_failover=False,
+                                                timeout_buffer=0,
+                                                check_for_failover=False,
+                                                disk_timeout=self.disk_timeout, disk_location=self.disk_location,
+                                                disk_size=self.disk_location_size)
+            self.task_manager.schedule(task)
+            try:
+                task.result()
+            except Exception, e:
+                self.fail("Exception: {}".format(e))
+        elif self.failover_action == "disk_full":
+            task = AutoFailoverNodesFailureTask(self.orchestrator,
+                                                self.server_to_fail,
+                                                "recover_disk_full_failure", self.timeout,
+                                                self.node_failure_task_manager,
+                                                self.failure_timer_task_manager,
+                                                expect_auto_failover=False,
+                                                timeout_buffer=0,
+                                                check_for_failover=False,
+                                                disk_timeout=self.disk_timeout, disk_location=self.disk_location,
+                                                disk_size=self.disk_location_size)
+            self.task_manager.schedule(task)
+            try:
+                task.result()
+            except Exception, e:
+                self.fail("Exception: {}".format(e))
+        else:
+            if self.failover_action == "firewall":
+                self.disable_firewall()
+            elif self.failover_action == "stop_server":
+                self.start_couchbase_server()
 
     def _servers_to_fail(self):
         """
