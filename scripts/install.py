@@ -1054,6 +1054,8 @@ class InstallerJob(object):
             if not success:
                 print "Server:{0}.Couchbase is still installed after uninstall".format(server)
                 return success
+        if "uninstall" in params and params['uninstall']==True:
+            return
         for t in install_threads:
             t.start()
         for t in install_threads:

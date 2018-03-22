@@ -19,6 +19,15 @@ class MultiNodeAutoFailoverTests(AutoFailoverBaseTest):
                                                           self.pause_between_failover_action < self.timeout or
                                                           self.num_replicas < failure_node_number)
         return not failover_not_expected
+
+    def _multi_node_failover(self):
+        servers_to_fail = self.server_to_fail
+        for i in range(self.max_count):
+            self.server_to_fail = [servers_to_fail[i]]
+            self.failover_expected = self._is_failover_expected(i + 1)
+            self.failover_actions[self.failover_action](self)
+            self.sleep(self.timeout)
+
     def test_autofailover(self):
         """
         Test the basic autofailover for different failure scenarios.
@@ -29,12 +38,7 @@ class MultiNodeAutoFailoverTests(AutoFailoverBaseTest):
         """
         self.enable_autofailover_and_validate()
         self.sleep(5)
-        servers_to_fail = self.server_to_fail
-        for i in range(self.max_count):
-            self.server_to_fail = [servers_to_fail[i]]
-            self.failover_expected = self._is_failover_expected(i + 1)
-            self.failover_actions[self.failover_action](self)
-            self.sleep(self.timeout)
+        self._multi_node_failover()
         self.disable_autofailover_and_validate()
 
     def _get_server_group_nodes(self, server_group):
@@ -72,7 +76,7 @@ class MultiNodeAutoFailoverTests(AutoFailoverBaseTest):
                                                       self.servers_to_add,
                                                       self.servers_to_remove)
         self.sleep(5)
-        self.failover_actions[self.failover_action](self)
+        self._multi_node_failover()
         try:
             rebalance_task.result()
         except RebalanceFailedException:
@@ -104,7 +108,7 @@ class MultiNodeAutoFailoverTests(AutoFailoverBaseTest):
         if not rebalance_success:
             self.disable_firewall()
             self.fail("Rebalance failed. Check logs")
-        self.failover_actions[self.failover_action](self)
+        self._multi_node_failover()
         self.disable_autofailover_and_validate()
 
     def test_rebalance_after_autofailover(self):
@@ -120,7 +124,7 @@ class MultiNodeAutoFailoverTests(AutoFailoverBaseTest):
         """
         self.enable_autofailover_and_validate()
         self.sleep(5)
-        self.failover_actions[self.failover_action](self)
+        self._multi_node_failover()
         for node in self.servers_to_add:
             self.rest.add_node(user=self.orchestrator.rest_username,
                                password=self.orchestrator.rest_password,
@@ -151,16 +155,15 @@ class MultiNodeAutoFailoverTests(AutoFailoverBaseTest):
             return
         self.enable_autofailover_and_validate()
         self.sleep(5)
-        self.failover_actions[self.failover_action](self)
+        self._multi_node_failover()
+        self.server_to_fail = self._servers_to_fail()
         self.bring_back_failed_nodes_up()
         self.sleep(30)
-        self.log.info(self.server_to_fail[0])
         self.nodes = self.rest.node_statuses()
-        self.log.info(self.nodes[0].id)
-        self.rest.add_back_node("ns_1@{}".format(self.server_to_fail[0].ip))
-        self.rest.set_recovery_type("ns_1@{}".format(self.server_to_fail[
-                                                         0].ip),
-                                    self.recovery_strategy)
+        for node in self.server_to_fail:
+            self.rest.add_back_node("ns_1@{}".format(node.ip))
+            self.rest.set_recovery_type("ns_1@{}".format(node.ip),
+                                        self.recovery_strategy)
         self.rest.rebalance(otpNodes=[node.id for node in self.nodes])
         msg = "rebalance failed while recovering failover nodes {0}".format(
             self.server_to_fail[0])
@@ -181,7 +184,7 @@ class MultiNodeAutoFailoverTests(AutoFailoverBaseTest):
             return
         self.enable_autofailover_and_validate()
         self.sleep(5)
-        self.failover_actions[self.failover_action](self)
+        self._multi_node_failover()
         self.nodes = self.rest.node_statuses()
         self.remove_after_failover = True
         self.rest.rebalance(otpNodes=[node.id for node in self.nodes])
