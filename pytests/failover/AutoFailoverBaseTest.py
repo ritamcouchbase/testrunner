@@ -83,6 +83,22 @@ class AutoFailoverBaseTest(BaseTestCase):
         if self.zone > 1:
             self.shuffle_nodes_between_zones_and_rebalance()
         self.add_built_in_server_user(node=self.master)
+        if self.total_buckets > 0:
+            node_info = self.rest.get_nodes_self()
+            if node_info.memoryQuota and int(node_info.memoryQuota) > 0:
+                ram_available = node_info.memoryQuota
+            else:
+                ram_available = self.quota
+            if self.bucket_size is None:
+                if self.dgm_run:
+                    self.bucket_size = self.quota
+                else:
+                    self.bucket_size = self._get_bucket_size(ram_available, \
+                                                             self.total_buckets)
+
+        self.bucket_base_params['membase']['non_ephemeral']['size'] = self.bucket_size
+        self.bucket_base_params['membase']['ephemeral']['size'] = self.bucket_size
+        self.bucket_base_params['memcached']['size'] = self.bucket_size
         if self.read_loadgen:
             self.bucket_size = 100
         super(AutoFailoverBaseTest,self)._bucket_creation()
