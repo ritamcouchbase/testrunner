@@ -106,8 +106,8 @@ class AutoFailoverBaseTest(BaseTestCase):
     def setUp(self):
         super(AutoFailoverBaseTest, self).setUp()
         self._get_params()
-        self.initialize_cluster()
         self.rest = RestConnection(self.orchestrator)
+        self.initialize_cluster()
         self.task_manager = TaskManager("Autofailover_thread")
         self.task_manager.start()
         self.node_failure_task_manager = TaskManager("Failure_injector_thread")
