@@ -189,3 +189,4 @@ class BackupRestoreValidationBase:
                 output = " ".join(output)
             with open(to_file_path, 'w') as f:
                 json.dump(output, f)
+        shell.disconnect()

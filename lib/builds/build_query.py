@@ -337,7 +337,10 @@ class BuildQuery(object):
                             else:
                                 os_name = "centos6"
                         elif "suse" in os_version.lower():
-                            os_name = "suse11"
+                            if "11" in os_version.lower():
+                                os_name = "suse11"
+                            elif "12" in os_version.lower():
+                                os_name = "suse12"
                         elif "oracle linux" in os_version.lower():
                             os_name = "oel6"
                         else:
@@ -389,7 +392,10 @@ class BuildQuery(object):
                             else:
                                 os_name = "centos6"
                         elif "suse" in os_version.lower():
-                            os_name = "suse11"
+                            if "11" in os_version.lower():
+                                os_name = "suse11"
+                            elif "12" in os_version.lower():
+                                os_name = "suse12"
                         elif "oracle linux" in os_version.lower():
                             os_name = "oel6"
                         else:
@@ -561,7 +567,7 @@ class BuildQuery(object):
             """ windows build name: couchbase_server-enterprise-windows-amd64-3.0.0-892.exe
                                     couchbase-server-enterprise_3.5.0-952-windows_amd64.exe """
             build.name = build_info
-            deliverable_type = ["exe", "rpm", "deb", "zip"]
+            deliverable_type = ["exe", "msi", "rpm", "deb", "zip"]
             if build_info[-3:] in deliverable_type:
                 build.deliverable_type = build_info[-3:]
                 build_info = build_info[:-4]
