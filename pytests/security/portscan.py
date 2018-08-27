@@ -69,7 +69,7 @@ class portscan(BaseTestCase):
 
 
     TEST_SSL_FILENAME = '/tmp/testssl.sh'
-    ports_to_check = [11207,18096, 18092, 18093, 18094, 18091,18096]
+    ports_to_check = [18096, 18095, 18093, 18094, 18091,18096]
 
 
 
@@ -196,7 +196,7 @@ class portscan(BaseTestCase):
             self.log.info('Testing port {0}'.format(i))
 
             # make sure all the tests were seen
-            if i in ('18095','18096'):
+            if str(i) in ('18095','18096'):
                self.assertTrue( check_count==8, msg='Port {0}. Not all checks present - saw {1} checks'.format(i, check_count))
             else:
                self.assertTrue( check_count==9, msg='Port {0}. Not all checks present - saw {1} checks'.format(i, check_count))
