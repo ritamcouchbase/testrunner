@@ -69,7 +69,7 @@ class portscan(BaseTestCase):
 
 
     TEST_SSL_FILENAME = '/tmp/testssl.sh'
-    ports_to_check = [11207,18095, 18092, 18093, 18094, 18091,18096]
+    ports_to_check = [11207,18096, 18092, 18093, 18094, 18091,18096]
 
 
 
