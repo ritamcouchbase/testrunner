@@ -197,6 +197,6 @@ class portscan(BaseTestCase):
 
             # make sure all the tests were seen
             if i in ('18095','18096'):
-               self.assertTrue( check_count==9, msg='Port {0}. Not all checks present - saw {1} checks'.format(i, check_count))
-            else:
                self.assertTrue( check_count==8, msg='Port {0}. Not all checks present - saw {1} checks'.format(i, check_count))
+            else:
+               self.assertTrue( check_count==9, msg='Port {0}. Not all checks present - saw {1} checks'.format(i, check_count))
